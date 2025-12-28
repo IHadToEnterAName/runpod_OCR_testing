@@ -15,7 +15,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 model = "mistral"
 vision_model = "llama3.2-vision"  # Modern: llama3.2-vision or moondream2
 embedding_model = "nomic-embed-text"  # ollama pull nomic-embed-text
-base_url = "https://n5uf695ugxngev-11434.proxy.runpod.net"
+base_url = "" #TODO: PUT PROXY LINK FOR OLLAMA HERE
 
 system_prompt_content = """You are a helpful AI assistant for corporate use. 
 Answer formally and answer in the same language you are questioned with.
