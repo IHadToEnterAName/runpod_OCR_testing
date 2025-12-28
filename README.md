@@ -43,8 +43,8 @@ source venv/bin/activate
 On Windows:
 
 ```bash
-python -m venv venv
-.\venv\Scripts\activate
+python -m venv runpod_test
+venv runpod_test/bin/activate
 
 ```
 
