@@ -53,7 +53,7 @@ python -m venv venv
 Once the virtual environment is activated, install the required libraries:
 
 ```bash
-pip install chainlit httpx PyMuPDF python-docx langchain-text-splitters numpy Pillow
+pip install -r requirements.txt
 
 ```
 
