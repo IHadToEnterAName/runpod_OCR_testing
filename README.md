@@ -1,5 +1,5 @@
 
-# Corporate Document Assistant (RAG + Vision)
+# Corporate Document Assistant Using Runpod GPU Server (RAG + Vision)
 
 This repository contains a professional AI assistant designed for corporate document analysis and information retrieval. The system utilizes Retrieval-Augmented Generation (RAG) and Vision-Language Models to process text, structured documents, and visual data from PDF, DOCX, and image files. This was tested using a **RTX 5090 GPU**.
 
