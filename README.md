@@ -95,7 +95,7 @@ chainlit run chat.py
 
 
 3. **Access UI:**
-Access the interface via the RunPod proxy link provided for port 8080.
+Access the interface via the RunPod proxy link provided using the local host link.
 
 ---
 
