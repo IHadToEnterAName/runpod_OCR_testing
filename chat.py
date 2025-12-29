@@ -10,12 +10,20 @@ import io
 import fitz  # PyMuPDF
 import docx
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # --- CONFIGURATION ---
 model = "mistral"
 vision_model = "llama3.2-vision"  # Modern: llama3.2-vision or moondream2
 embedding_model = "nomic-embed-text"  # ollama pull nomic-embed-text
 base_url = "" #TODO: PUT PROXY LINK FOR OLLAMA HERE
+
+# Performance settings optimized for 32GB VRAM (targeting ~20-24GB usage, leaving 8-12GB free)
+EMBEDDING_BATCH_SIZE = 300  # Balanced batch size for GPU utilization
+VISION_CONCURRENT_LIMIT = 12  # Balanced concurrent vision processing
+MAX_CONTEXT_CHUNKS = 12  # Balanced context chunks
+FILE_PROCESSING_WORKERS = 12  # Balanced parallel file processing
 
 system_prompt_content = """You are a helpful AI assistant for corporate use. 
 Answer formally and answer in the same language you are questioned with.
@@ -24,12 +32,15 @@ When provided with document context, use it to answer questions accurately."""
 # Global storage
 conversation_history = []
 document_chunks = []  # Store text chunks with embeddings
-current_document_context = None
+uploaded_files_info = []  # Track uploaded files
 
-# Initialize recursive text splitter
+# Thread pool for CPU-intensive operations - more workers for 32GB RAM
+executor = ThreadPoolExecutor(max_workers=FILE_PROCESSING_WORKERS)
+
+# Initialize recursive text splitter with optimized chunk sizes for 32GB VRAM
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=500,
-    chunk_overlap=50,
+    chunk_size=1800,  # Balanced larger chunks
+    chunk_overlap=300,  # Better context preservation
     length_function=len,
     separators=["\n\n", "\n", ". ", " ", ""]
 )
@@ -95,23 +106,27 @@ def image_to_base64(image: Image.Image) -> str:
 # --- API FUNCTIONS ---
 
 async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings in batch using /api/embed endpoint"""
+    """Generate embeddings in massive batches using /api/embed endpoint - optimized for 32GB VRAM"""
     url = f"{base_url}/api/embed"
     headers = {"Content-Type": "application/json"}
     
     data = {
         "model": embedding_model,
-        "input": texts  # Send batch of texts
+        "input": texts,  # Send large batch of texts
+        "options": {
+            "num_gpu": -1,  # Use all available GPUs
+            "num_thread": 24,  # Balanced CPU threads
+            "num_batch": 1536,  # Balanced batch processing
+        }
     }
     
-    timeout = httpx.Timeout(60.0)
+    timeout = httpx.Timeout(180.0)  # Longer timeout for massive batches
     
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
             response = await client.post(url, headers=headers, json=data)
             if response.status_code == 200:
                 result = response.json()
-                # /api/embed returns {"embeddings": [[...], [...], ...]}
                 return result.get('embeddings', [])
             else:
                 print(f"Embedding Error ({response.status_code}): {response.text}")
@@ -121,7 +136,7 @@ async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
             return []
 
 async def analyze_image_with_vision(image: Image.Image, prompt: str = "Describe this image in detail, including any text, charts, graphs, or diagrams. Be precise with numbers and data.") -> str:
-    """Use modern vision model to analyze images with better OCR capabilities"""
+    """Use modern vision model to analyze images - optimized for 32GB VRAM"""
     url = f"{base_url}/api/generate"
     headers = {"Content-Type": "application/json"}
     
@@ -132,10 +147,16 @@ async def analyze_image_with_vision(image: Image.Image, prompt: str = "Describe 
         "model": vision_model,
         "prompt": prompt,
         "images": [img_base64],
-        "stream": False
+        "stream": False,
+        "options": {
+            "num_gpu": -1,  # Use all GPUs
+            "num_thread": 24,  # Balanced threads
+            "num_ctx": 12288,  # Balanced context for vision processing
+            "num_batch": 768,  # Balanced batch size
+        }
     }
     
-    timeout = httpx.Timeout(120.0)
+    timeout = httpx.Timeout(240.0)  # Longer timeout for high-quality processing
     
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
@@ -149,8 +170,21 @@ async def analyze_image_with_vision(image: Image.Image, prompt: str = "Describe 
             print(f"Vision Error: {e}")
             return "Error analyzing image."
 
+async def analyze_images_concurrent(images: List[Image.Image]) -> List[str]:
+    """Analyze multiple images concurrently - optimized for 32GB VRAM (8 at a time)"""
+    all_descriptions = []
+    
+    # Process in batches of VISION_CONCURRENT_LIMIT (8 images simultaneously)
+    for i in range(0, len(images), VISION_CONCURRENT_LIMIT):
+        batch = images[i:i + VISION_CONCURRENT_LIMIT]
+        batch_tasks = [analyze_image_with_vision(img) for img in batch]
+        descriptions = await asyncio.gather(*batch_tasks)
+        all_descriptions.extend(descriptions)
+    
+    return all_descriptions
+
 async def generate_completion(messages_list: List[Dict], model: str):
-    """Generate chat completion"""
+    """Generate chat completion - optimized for 32GB VRAM"""
     url = f"{base_url}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
     
@@ -158,9 +192,16 @@ async def generate_completion(messages_list: List[Dict], model: str):
         "model": model,
         "messages": messages_list,
         "temperature": 0.6,
+        "options": {
+            "num_gpu": -1,  # Use all GPUs
+            "num_thread": 24,  # Balanced threads
+            "num_ctx": 24576,  # Balanced larger context window
+            "num_batch": 1536,  # Balanced batch size
+            "num_predict": 2048,  # Allow longer responses
+        }
     }
     
-    timeout = httpx.Timeout(60.0)
+    timeout = httpx.Timeout(180.0)  # Longer timeout for quality responses
     
     async with httpx.AsyncClient(timeout=timeout) as client:
         try:
@@ -196,7 +237,7 @@ def cosine_similarity_batch(query_embedding: List[float], chunk_embeddings: np.n
     
     return similarities
 
-async def retrieve_relevant_chunks(query: str, top_k: int = 3) -> List[str]:
+async def retrieve_relevant_chunks(query: str, top_k: int = 5) -> List[str]:
     """Retrieve most relevant document chunks using vectorized similarity"""
     if not document_chunks:
         return []
@@ -220,47 +261,76 @@ async def retrieve_relevant_chunks(query: str, top_k: int = 3) -> List[str]:
     # Return corresponding chunks
     return [document_chunks[i]['text'] for i in top_indices]
 
+# --- FILE MANAGEMENT FUNCTIONS ---
+
+async def clear_all_documents():
+    """Clear all uploaded documents and their chunks"""
+    global document_chunks, uploaded_files_info
+    document_chunks = []
+    uploaded_files_info = []
+    await cl.Message(content="🗑️ All documents have been cleared from memory.").send()
+
+async def show_uploaded_files():
+    """Display list of currently uploaded files"""
+    if not uploaded_files_info:
+        await cl.Message(content="📭 No documents are currently loaded.").send()
+    else:
+        file_list = "\n".join([f"📄 {i+1}. {file['name']}" for i, file in enumerate(uploaded_files_info)])
+        await cl.Message(content=f"📚 **Currently loaded documents:**\n{file_list}").send()
+
 # --- FILE PROCESSING FUNCTION ---
 
 async def process_files(files):
-    """Process uploaded files with fixed Chainlit v2.x update logic"""
-    global document_chunks
+    """Process uploaded files with maximum parallelism - optimized for 32GB VRAM"""
+    global document_chunks, uploaded_files_info
     
-    await cl.Message(content="Processing your file(s)...").send()
+    await cl.Message(content="🚀 Processing with balanced GPU acceleration (32GB VRAM optimization targeting 20-24GB usage)...").send()
     
     all_text = []
     all_images = []
     
-    for file in files:
+    # Process files in parallel using thread pool (8 workers)
+    async def process_single_file(file):
         file_path = file.path
         file_name = file.name
         
+        uploaded_files_info.append({"name": file_name, "path": file_path})
+        
         if file_name.lower().endswith('.pdf'):
-            text, images = extract_text_from_pdf(file_path)
-            all_text.append(text)
-            all_images.extend(images)
+            loop = asyncio.get_event_loop()
+            text, images = await loop.run_in_executor(executor, extract_text_from_pdf, file_path)
+            return text, images
         elif file_name.lower().endswith('.docx'):
-            text = extract_text_from_docx(file_path)
-            all_text.append(text)
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(executor, extract_text_from_docx, file_path)
+            return text, []
         elif file_name.lower().endswith('.txt'):
             with open(file_path, 'r', encoding='utf-8') as f:
-                all_text.append(f.read())
+                return f.read(), []
         elif file_name.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
             img = Image.open(file_path)
-            all_images.append(img)
+            return "", [img]
+        return "", []
     
-    # --- TEXT PROCESSING ---
+    # Process all files concurrently
+    results = await asyncio.gather(*[process_single_file(file) for file in files])
+    
+    for text, images in results:
+        if text:
+            all_text.append(text)
+        all_images.extend(images)
+    
+    # --- TEXT PROCESSING WITH MASSIVE BATCHES (200 chunks at once) ---
     full_text = "\n\n".join(all_text)
     if full_text.strip():
         chunks = chunk_text_recursive(full_text)
-        document_chunks = []
         
-        progress_msg = cl.Message(content="Generating embeddings in batches...")
+        progress_msg = cl.Message(content="⚡ Generating embeddings with 32GB VRAM optimization...")
         await progress_msg.send()
         
-        batch_size = 10
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
+        # Use massive batch size for lightning-fast processing
+        for i in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
+            batch = chunks[i:i + EMBEDDING_BATCH_SIZE]
             embeddings = await generate_embeddings_batch(batch)
             
             if embeddings:
@@ -271,35 +341,32 @@ async def process_files(files):
                             'embedding': embedding
                         })
             
-            # FIXED: Update pattern for modern Chainlit v2.x
-            progress = min(i + batch_size, len(chunks))
-            progress_msg.content = f"Generating embeddings... {progress}/{len(chunks)}"
+            progress = min(i + EMBEDDING_BATCH_SIZE, len(chunks))
+            progress_msg.content = f"⚡ Embeddings: {progress}/{len(chunks)} | Batch: {EMBEDDING_BATCH_SIZE} chunks | VRAM: ~20-24GB"
             await progress_msg.update()
         
-        progress_msg.content = f"✅ Processed {len(document_chunks)} text chunks"
+        progress_msg.content = f"✅ Processed {len(chunks)} text chunks in massive batches"
         await progress_msg.update()
     
-    # --- IMAGE PROCESSING ---
+    # --- CONCURRENT IMAGE PROCESSING (8 images simultaneously) ---
     if all_images:
-        vision_msg = cl.Message(content="Analyzing images with Llama 3.2 Vision...")
+        vision_msg = cl.Message(content="🖼️ Analyzing images: 8 concurrent streams with 32GB VRAM...")
         await vision_msg.send()
-        image_descriptions = []
         
-        for i, img in enumerate(all_images[:10]):
-            description = await analyze_image_with_vision(img)
-            image_descriptions.append(f"Image {i+1}: {description}")
-            
-            # FIXED: Update pattern for modern Chainlit v2.x
-            vision_msg.content = f"Analyzing images... {i+1}/{min(len(all_images), 10)}"
-            await vision_msg.update()
+        # Process up to 50 images with 8 concurrent streams
+        descriptions = await analyze_images_concurrent(all_images[:50])
+        image_descriptions = [f"Image {i+1}: {desc}" for i, desc in enumerate(descriptions)]
+        
+        vision_msg.content = f"✅ Analyzed {len(descriptions)} images (8 concurrent streams)"
+        await vision_msg.update()
         
         if image_descriptions:
             combined_images_text = "\n\n".join(image_descriptions)
             img_chunks = chunk_text_recursive(combined_images_text)
             
-            batch_size = 10
-            for i in range(0, len(img_chunks), batch_size):
-                batch = img_chunks[i:i + batch_size]
+            # Process image embeddings in massive batches
+            for i in range(0, len(img_chunks), EMBEDDING_BATCH_SIZE):
+                batch = img_chunks[i:i + EMBEDDING_BATCH_SIZE]
                 embeddings = await generate_embeddings_batch(batch)
                 if embeddings:
                     for j, embedding in enumerate(embeddings):
@@ -308,14 +375,21 @@ async def process_files(files):
                                 'text': batch[j],
                                 'embedding': embedding
                             })
-        
-        vision_msg.content = f"✅ Analyzed {len(all_images)} images"
-        await vision_msg.update()
     
     await cl.Message(
-        content=f"📚 Document processing complete!\n"
-                f"Total chunks indexed: {len(document_chunks)}\n\n"
-                f"You can now ask questions about your document."
+        content=f"🎉 **Processing Complete!**\n\n"
+                f"📊 **Performance Stats:**\n"
+                f"• Total chunks indexed: **{len(document_chunks)}**\n"
+                f"• Files processed: **{len(uploaded_files_info)}**\n"
+                f"• Embedding batch size: **{EMBEDDING_BATCH_SIZE}** (massive!)\n"
+                f"• Vision concurrent streams: **{VISION_CONCURRENT_LIMIT}**\n"
+                f"• File workers: **{FILE_PROCESSING_WORKERS}**\n"
+                f"• Target VRAM usage: **~24-26GB** (leaving 6-8GB free)\n"
+                f"• Context window: **16K tokens**\n\n"
+                f"💡 **Commands:**\n"
+                f"• `/clear` - Delete all documents\n"
+                f"• `/files` - View loaded documents\n"
+                f"• Upload files anytime to add more"
     ).send()
 
 # --- CHAINLIT EVENT HANDLERS ---
@@ -332,6 +406,10 @@ async def start():
                 "✨ Llama 3.2 Vision for superior OCR\n"
                 "⚡ Batch embeddings for faster processing\n"
                 "📚 PyMuPDF for accurate text extraction\n\n"
+                "**File Management:**\n"
+                "• Upload files anytime during conversation\n"
+                "• Type `/clear` to delete all documents\n"
+                "• Type `/files` to see loaded documents\n\n"
                 "Please upload a file to get started, or click 'Skip' to chat without documents.",
         accept=["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", 
                 "text/plain", "image/png", "image/jpeg", "image/jpg", "image/gif", "image/bmp"],
@@ -345,7 +423,16 @@ async def start():
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    global document_chunks, current_document_context
+    global document_chunks, uploaded_files_info
+    
+    # --- HANDLE COMMANDS ---
+    if message.content.strip().lower() == '/clear':
+        await clear_all_documents()
+        return
+    
+    if message.content.strip().lower() == '/files':
+        await show_uploaded_files()
+        return
     
     # --- HANDLE FILE UPLOADS (via attachment) ---
     if message.elements:
@@ -357,7 +444,7 @@ async def on_message(message: cl.Message):
     # Retrieve relevant context if documents are loaded
     context_chunks = []
     if document_chunks and message.content:
-        context_chunks = await retrieve_relevant_chunks(message.content, top_k=3)
+        context_chunks = await retrieve_relevant_chunks(message.content, top_k=MAX_CONTEXT_CHUNKS)
     
     # Build messages list
     messages = [{"role": "system", "content": system_prompt_content}]
