@@ -12,3 +12,6 @@ langchain-text-splitters==1.1.0
 # --- Math & Image Handling ---
 numpy==2.4.0
 Pillow==12.0.0
+
+
+###pip install ollama chainlit PyMuPDF python-docx langchain-text-splitters numpy pillow
