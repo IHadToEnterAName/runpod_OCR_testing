@@ -130,5 +130,30 @@ watch -n 1 nvidia-smi
 
 ```
 
+0. Storage & Cache Initialization
+Run these commands first to prepare the persistent volume. This prevents the small root partition from filling up and ensures you don't have to re-download models if the pod restarts.
+
+Bash
+
+# Create the directory for HuggingFace model weights
+mkdir -p /workspace/huggingface
+
+# Create the directory for vLLM's internal compilation & kernel cache
+mkdir -p /workspace/vllm_cache
+
+# Create the directory for your uploaded documents and processed images
+mkdir -p /workspace/data
+1. Linking Directories to the System
+We use environment variables to tell the AI libraries to use these specific folders on the large disk.
+
+Bash
+
+# Point HuggingFace to the 400TB volume
+export HF_HOME="/workspace/huggingface"
+
+# Point vLLM's compiler to the persistent cache folder
+# This speeds up subsequent launches of the Vision model
+export VLLM_CACHE_ROOT="/workspace/vllm_cache"
+
 ---
 
