@@ -1,5 +1,5 @@
 import chainlit as cl
-import ollama
+from openai import AsyncOpenAI
 import json
 import os
 from pathlib import Path
@@ -18,47 +18,79 @@ from typing_extensions import TypedDict
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
+from sentence_transformers import SentenceTransformer
+import tiktoken
 
-# --- OLLAMA ENVIRONMENT CONFIGURATION ---
-# Set these before importing/using Ollama to optimize performance
-os.environ['OLLAMA_NUM_PARALLEL'] = '4'  # Max parallel requests (reduced from 8)
-os.environ['OLLAMA_MAX_LOADED_MODELS'] = '3'  # Keep 3 models in memory
-os.environ['OLLAMA_KEEP_ALIVE'] = '30m'  # Keep models loaded for 30 minutes
-os.environ['OLLAMA_FLASH_ATTENTION'] = '1'  # Enable flash attention
-os.environ['OLLAMA_HOST'] = '0.0.0.0:11434'  # Ollama server host
+# --- vLLM CLIENT CONFIGURATION ---
+vision_client = AsyncOpenAI(
+    base_url="http://localhost:8006/v1",
+    api_key="EMPTY"
+)
 
-# --- CONFIGURATION ---
-# Ollama model names
-LLM_MODEL = "deepseek-r1"
-VISION_MODEL = "qwen-vl-2.5"
-EMBEDDING_MODEL = "nomic-embed-text"
+reasoning_client = AsyncOpenAI(
+    base_url="http://localhost:8005/v1",
+    api_key="EMPTY"
+)
 
-# Performance settings - REDUCED for stability and deadlock prevention
-EMBEDDING_BATCH_SIZE = 256  # Reduced from 512
-VISION_CONCURRENT_LIMIT = 3  # Reduced from 8 to prevent GPU contention
+# --- MODEL CONFIGURATION ---
+VISION_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
+REASONING_MODEL = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+EMBEDDING_MODEL_NAME = "nomic-ai/nomic-embed-text-v1.5"
+
+# --- PERFORMANCE SETTINGS (TUNED FOR RTX 5090) ---
+VISION_CONCURRENT_LIMIT = 12 
+EMBEDDING_BATCH_SIZE = 64
+EMBEDDING_MAX_LENGTH = 8192  
 MAX_CONTEXT_CHUNKS = 16
-FILE_PROCESSING_WORKERS = 8  # Reduced from 16
-LLM_MAX_TOKENS = 8192
+FILE_PROCESSING_WORKERS = 12
+
+# CRITICAL: Context window management
+MODEL_MAX_TOKENS = 8192  # vLLM server's --max-model-len
+MAX_OUTPUT_TOKENS = 2048  # Reserve for generation
+MAX_INPUT_TOKENS = MODEL_MAX_TOKENS - MAX_OUTPUT_TOKENS  # 6144 tokens for input
 VISION_MAX_TOKENS = 4096
 
-# UI Update throttling to prevent Socket.IO overflow
-UI_UPDATE_INTERVAL = 2.0  # Update UI every 2 seconds max
-MIN_UPDATE_ITEMS = 5  # Update UI every N items processed
+# Safety margin for tokenization differences
+TOKEN_SAFETY_MARGIN = 500
 
-# Ollama performance options
-OLLAMA_OPTIONS = {
-    "num_ctx": 8192,
-    "num_gpu": -1,
-    "num_thread": 16,
-    "num_batch": 512,
-}
+# --- UI SETTINGS ---
+UI_UPDATE_INTERVAL = 2.0
+MIN_UPDATE_ITEMS = 5
 
-# --- SEMAPHORES FOR THREAD SAFETY ---
-# These prevent deadlocks and manage concurrent access
-embedding_semaphore = asyncio.Semaphore(4)  # Max 4 concurrent embedding calls
-vision_semaphore = asyncio.Semaphore(VISION_CONCURRENT_LIMIT)  # Max 3 concurrent vision calls
-llm_semaphore = asyncio.Semaphore(2)  # Max 2 concurrent LLM calls
-file_lock = asyncio.Lock()  # Exclusive lock for file operations
+# --- SEMAPHORES ---
+vision_semaphore = asyncio.Semaphore(VISION_CONCURRENT_LIMIT)
+llm_semaphore = asyncio.Semaphore(4)
+file_lock = asyncio.Lock()
+
+# --- EMBEDDING MODEL INITIALIZATION ---
+os.environ["HF_HOME"] = "/workspace/huggingface"
+
+embedding_model = SentenceTransformer(
+    EMBEDDING_MODEL_NAME, 
+    trust_remote_code=True
+)
+embedding_model.to('cuda')
+embedding_model.max_seq_length = EMBEDDING_MAX_LENGTH
+
+# --- TOKENIZER INITIALIZATION ---
+# Use cl100k_base for approximate token counting (similar to GPT-4)
+try:
+    tokenizer = tiktoken.get_encoding("cl100k_base")
+except:
+    print("⚠️ tiktoken not available, using character approximation")
+    tokenizer = None
+
+def count_tokens(text: str) -> int:
+    """Count tokens in text (approximate)"""
+    if tokenizer:
+        return len(tokenizer.encode(text))
+    else:
+        # Rough approximation: 1 token ≈ 4 characters
+        return len(text) // 4
+
+print(f"✅ Configuration Loaded: Models connected to ports 8005/8006")
+print(f"✅ Embedding Model {EMBEDDING_MODEL_NAME} active on RTX 5090")
+print(f"⚠️ Context window: {MODEL_MAX_TOKENS} tokens (Input: {MAX_INPUT_TOKENS}, Output: {MAX_OUTPUT_TOKENS})")
 
 system_prompt_content = """
 # ROLE & OBJECTIVE
@@ -91,8 +123,8 @@ executor = ThreadPoolExecutor(max_workers=FILE_PROCESSING_WORKERS)
 
 # Initialize text splitter
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1800,
-    chunk_overlap=300,
+    chunk_size=6000,
+    chunk_overlap=600,
     length_function=len,
     separators=["\n\n", "\n", ". ", " ", ""]
 )
@@ -123,7 +155,6 @@ def extract_text_from_pdf(file_path: str, progress_callback=None) -> Tuple[str, 
             text = page.get_text("text")
             text_content.append(f"--- Page {page_num + 1} ---\n{text}")
             
-            # Report progress
             if progress_callback:
                 progress_callback(f"✅ Extracted page {page_num + 1}/{total_pages}")
             print(f"✅ PDF: Extracted page {page_num + 1}/{total_pages}")
@@ -173,72 +204,186 @@ def image_to_base64(image: Image.Image) -> str:
     image.save(buffered, format="PNG")
     return base64.b64encode(buffered.getvalue()).decode('utf-8')
 
-# --- OLLAMA INFERENCE FUNCTIONS WITH SEMAPHORES ---
+def smart_truncate_messages(messages: List[Dict], max_tokens: int) -> List[Dict]:
+    """
+    Intelligently truncate messages to fit within token limit.
+    Priority: System prompt > Current query > Recent context > Older context
+    """
+    if not messages:
+        return messages
+    
+    # Separate system messages, context, and user messages
+    system_msgs = [m for m in messages if m["role"] == "system"]
+    user_msgs = [m for m in messages if m["role"] == "user"]
+    assistant_msgs = [m for m in messages if m["role"] == "assistant"]
+    
+    # Start with essential components
+    truncated = []
+    current_tokens = 0
+    
+    # 1. Always include main system prompt (first system message)
+    if system_msgs:
+        main_system = system_msgs[0]
+        system_tokens = count_tokens(main_system["content"])
+        truncated.append(main_system)
+        current_tokens += system_tokens
+        
+        # 2. Check if there's a context system message (second system message with DOCUMENT CONTEXT)
+        context_msg = None
+        if len(system_msgs) > 1:
+            context_msg = system_msgs[1]
+            context_tokens = count_tokens(context_msg["content"])
+            
+            # If context fits, include it
+            if current_tokens + context_tokens <= max_tokens - TOKEN_SAFETY_MARGIN:
+                truncated.append(context_msg)
+                current_tokens += context_tokens
+            else:
+                # Truncate context chunks to fit
+                context_content = context_msg["content"]
+                
+                # Extract chunks from context
+                if "---DOCUMENT CONTEXT---" in context_content:
+                    parts = context_content.split("---DOCUMENT CONTEXT---")
+                    if len(parts) > 1:
+                        prefix = parts[0]
+                        middle = parts[1].split("---END CONTEXT---")[0] if "---END CONTEXT---" in parts[1] else parts[1]
+                        suffix = "---END CONTEXT---\n" if "---END CONTEXT---" in context_content else ""
+                        
+                        # Calculate available tokens for chunks
+                        overhead_tokens = count_tokens(prefix + suffix)
+                        available_for_chunks = max_tokens - current_tokens - overhead_tokens - TOKEN_SAFETY_MARGIN - 500
+                        
+                        if available_for_chunks > 0:
+                            # Truncate middle content
+                            chunks = middle.split("\n\n")
+                            selected_chunks = []
+                            chunk_tokens = 0
+                            
+                            for chunk in chunks:
+                                chunk_token_count = count_tokens(chunk)
+                                if chunk_tokens + chunk_token_count <= available_for_chunks:
+                                    selected_chunks.append(chunk)
+                                    chunk_tokens += chunk_token_count
+                                else:
+                                    break
+                            
+                            if selected_chunks:
+                                truncated_content = prefix + "---DOCUMENT CONTEXT---\n" + "\n\n".join(selected_chunks) + "\n" + suffix
+                                truncated.append({"role": "system", "content": truncated_content})
+                                current_tokens += count_tokens(truncated_content)
+                                print(f"⚠️ Context truncated: {len(chunks)} → {len(selected_chunks)} chunks to fit token limit")
+    
+    # 3. Add recent conversation history (last 3 exchanges max)
+    conversation_pairs = []
+    for i in range(len(user_msgs) - 1):  # Exclude last user message (current query)
+        if i < len(assistant_msgs):
+            conversation_pairs.append((user_msgs[i], assistant_msgs[i]))
+    
+    # Take last 3 pairs
+    recent_pairs = conversation_pairs[-3:] if len(conversation_pairs) > 3 else conversation_pairs
+    
+    for user_msg, assistant_msg in recent_pairs:
+        pair_tokens = count_tokens(user_msg["content"]) + count_tokens(assistant_msg["content"])
+        if current_tokens + pair_tokens <= max_tokens - TOKEN_SAFETY_MARGIN - 500:
+            truncated.append(user_msg)
+            truncated.append(assistant_msg)
+            current_tokens += pair_tokens
+        else:
+            break
+    
+    # 4. Always include current user query (last message)
+    if user_msgs:
+        current_query = user_msgs[-1]
+        query_tokens = count_tokens(current_query["content"])
+        
+        if current_tokens + query_tokens <= max_tokens - TOKEN_SAFETY_MARGIN:
+            truncated.append(current_query)
+            current_tokens += query_tokens
+        else:
+            # Query is too long, truncate it
+            print("⚠️ Current query exceeds token limit, truncating...")
+            max_query_tokens = max_tokens - current_tokens - TOKEN_SAFETY_MARGIN
+            truncated_query = current_query["content"][:max_query_tokens * 4]  # Rough char estimate
+            truncated.append({"role": "user", "content": truncated_query})
+    
+    print(f"📊 Token management: {len(messages)} messages → {len(truncated)} messages (~{current_tokens} tokens)")
+    
+    return truncated
+
+# --- vLLM INFERENCE FUNCTIONS ---
 
 async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
-    """Generate embeddings with semaphore protection"""
-    async with embedding_semaphore:
-        try:
-            all_embeddings = []
-            
-            for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
-                batch = texts[i:i + EMBEDDING_BATCH_SIZE]
-                
-                loop = asyncio.get_event_loop()
-                
-                def embed_batch():
-                    batch_embeddings = []
-                    for text in batch:
-                        response = ollama.embeddings(
-                            model=EMBEDDING_MODEL,
-                            prompt=text
-                        )
-                        batch_embeddings.append(response['embedding'])
-                    return batch_embeddings
-                
-                embeddings = await loop.run_in_executor(executor, embed_batch)
-                all_embeddings.extend(embeddings)
-                
-                # Small delay to prevent overwhelming the GPU
-                await asyncio.sleep(0.1)
-            
-            return all_embeddings
-        except Exception as e:
-            print(f"Embedding Error: {e}")
-            import traceback
-            traceback.print_exc()
+    """Generate embeddings using Nomic Embed Text v1.5"""
+    try:
+        if not texts:
             return []
+        
+        loop = asyncio.get_event_loop()
+        
+        def encode_batch():
+            prefixed_texts = [f"search_document: {text}" for text in texts]
+            
+            embeddings = embedding_model.encode(
+                prefixed_texts, 
+                batch_size=EMBEDDING_BATCH_SIZE,
+                show_progress_bar=False,
+                convert_to_numpy=True,
+                normalize_embeddings=True
+            )
+            return embeddings.tolist()
+        
+        embeddings = await loop.run_in_executor(executor, encode_batch)
+        
+        print(f"✅ Generated {len(embeddings)} embeddings in batch (Nomic 8K context)")
+        return embeddings
+        
+    except Exception as e:
+        print(f"❌ Embedding Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
 
-async def analyze_image_with_vision(image: Image.Image, image_num: int = 0, total_images: int = 0, prompt: str = "Describe this image in detail, including any text, charts, graphs, or diagrams. Be precise with numbers and data.") -> str:
-    """Use Llama 3.2 Vision with semaphore protection"""
+async def analyze_image_with_vision(
+    image: Image.Image, 
+    image_num: int = 0, 
+    total_images: int = 0, 
+    prompt: str = "Describe this image in detail, including any text, charts, graphs, or diagrams. Be precise with numbers and data."
+) -> str:
+    """Use vLLM Vision model with OpenAI-compatible API"""
     async with vision_semaphore:
         try:
             print(f"🖼️  Processing image {image_num}/{total_images}...")
             
             img_base64 = image_to_base64(image)
             
-            loop = asyncio.get_event_loop()
-            
-            def vision_inference():
-                response = ollama.generate(
-                    model=VISION_MODEL,
-                    prompt=prompt,
-                    images=[img_base64],
-                    options={
-                        "num_ctx": VISION_MAX_TOKENS,
-                        "num_gpu": -1,
-                        "num_thread": 8,
-                        "temperature": 0.6,
+            response = await vision_client.chat.completions.create(
+                model=VISION_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_base64}"
+                                }
+                            }
+                        ]
                     }
-                )
-                return response['response']
+                ],
+                max_tokens=VISION_MAX_TOKENS,
+                temperature=0.6
+            )
             
-            description = await loop.run_in_executor(executor, vision_inference)
-            
+            description = response.choices[0].message.content
             print(f"✅ Completed image {image_num}/{total_images}")
             
-            # Delay between vision calls to prevent GPU contention
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.1)
             
             return description.strip()
             
@@ -249,14 +394,13 @@ async def analyze_image_with_vision(image: Image.Image, image_num: int = 0, tota
             return "Error analyzing image."
 
 async def analyze_images_concurrent(images: List[Image.Image], progress_msg=None) -> List[str]:
-    """Analyze images with controlled concurrency (3 concurrent)"""
+    """Analyze images with high concurrency for RTX 5090"""
     all_descriptions = []
     total_images = len(images)
     last_update_time = time.time()
     
-    print(f"\n🖼️  Starting analysis of {total_images} images...")
+    print(f"\n🖼️  Starting analysis of {total_images} images with {VISION_CONCURRENT_LIMIT} concurrent workers...")
     
-    # Process 3 images at a time (reduced from 8)
     for i in range(0, len(images), VISION_CONCURRENT_LIMIT):
         batch = images[i:i + VISION_CONCURRENT_LIMIT]
         batch_num = i // VISION_CONCURRENT_LIMIT + 1
@@ -264,14 +408,12 @@ async def analyze_images_concurrent(images: List[Image.Image], progress_msg=None
         
         print(f"\n📦 Batch {batch_num}/{total_batches}: Processing {len(batch)} images concurrently...")
         
-        # Update UI only every UI_UPDATE_INTERVAL seconds
         current_time = time.time()
         if progress_msg and (current_time - last_update_time >= UI_UPDATE_INTERVAL or batch_num == 1 or batch_num == total_batches):
             progress_msg.content = f"🖼️ Analyzing images: Batch {batch_num}/{total_batches} ({i+1}-{min(i+len(batch), total_images)}/{total_images})"
             await progress_msg.update()
             last_update_time = current_time
         
-        # Create tasks with image numbers
         batch_tasks = [
             analyze_image_with_vision(img, i+j+1, total_images) 
             for j, img in enumerate(batch)
@@ -281,10 +423,8 @@ async def analyze_images_concurrent(images: List[Image.Image], progress_msg=None
         
         print(f"✅ Batch {batch_num}/{total_batches} complete")
         
-        # Delay between batches
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.2)
     
-    # Final UI update
     if progress_msg:
         progress_msg.content = f"✅ Completed analysis of {total_images} images"
         await progress_msg.update()
@@ -292,45 +432,69 @@ async def analyze_images_concurrent(images: List[Image.Image], progress_msg=None
     print(f"\n🎉 All {total_images} images analyzed!\n")
     return all_descriptions
 
-async def generate_completion(messages_list: List[Dict], temperature: float = 0.6) -> Dict:
-    """Generate completion with semaphore protection"""
+async def generate_completion_stream(messages_list: List[Dict], temperature: float = 0.6):
+    """Generate streaming completion with automatic context management"""
     async with llm_semaphore:
         try:
+            # Smart truncation to fit within context window
+            truncated_messages = smart_truncate_messages(messages_list, MAX_INPUT_TOKENS)
+            
             formatted_messages = []
-            for msg in messages_list:
+            for msg in truncated_messages:
                 formatted_messages.append({
                     "role": msg["role"],
                     "content": msg["content"]
                 })
             
-            loop = asyncio.get_event_loop()
+            stream = await reasoning_client.chat.completions.create(
+                model=REASONING_MODEL,
+                messages=formatted_messages,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                temperature=temperature,
+                stream=True
+            )
             
-            def llm_inference():
-                response = ollama.chat(
-                    model=LLM_MODEL,
-                    messages=formatted_messages,
-                    options={
-                        **OLLAMA_OPTIONS,
-                        "temperature": temperature,
-                        "num_predict": 2048,
-                    }
-                )
-                return response
+            return stream
             
-            response = await loop.run_in_executor(executor, llm_inference)
+        except Exception as e:
+            print(f"❌ Generation Error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+async def generate_completion(messages_list: List[Dict], temperature: float = 0.6) -> Dict:
+    """Generate non-streaming completion with automatic context management"""
+    async with llm_semaphore:
+        try:
+            # Smart truncation to fit within context window
+            truncated_messages = smart_truncate_messages(messages_list, MAX_INPUT_TOKENS)
+            
+            formatted_messages = []
+            for msg in truncated_messages:
+                formatted_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            response = await reasoning_client.chat.completions.create(
+                model=REASONING_MODEL,
+                messages=formatted_messages,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                temperature=temperature
+            )
             
             return {
                 "choices": [
                     {
                         "message": {
                             "role": "assistant",
-                            "content": response['message']['content']
+                            "content": response.choices[0].message.content
                         }
                     }
                 ]
             }
         except Exception as e:
-            print(f"Generation Error: {e}")
+            print(f"❌ Generation Error: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -347,7 +511,6 @@ async def retrieve_context_node(state: AgentState) -> AgentState:
         state['reasoning_steps'].append("⚠️ No documents loaded")
         return state
     
-    # Retrieve chunks
     chunks = await retrieve_relevant_chunks(query, top_k=MAX_CONTEXT_CHUNKS)
     state['retrieved_chunks'] = chunks
     state['reasoning_steps'].append(f"✅ Retrieved {len(chunks)} relevant chunks")
@@ -394,17 +557,14 @@ async def answer_generation_node(state: AgentState) -> AgentState:
     
     return state
 
-# Build LangGraph workflow
 def build_agent_graph():
     """Build the agentic reasoning graph"""
     workflow = StateGraph(AgentState)
     
-    # Add nodes
     workflow.add_node("retrieve", retrieve_context_node)
     workflow.add_node("reason", reasoning_node)
     workflow.add_node("answer", answer_generation_node)
     
-    # Define edges
     workflow.set_entry_point("retrieve")
     workflow.add_edge("retrieve", "reason")
     workflow.add_edge("reason", "answer")
@@ -412,7 +572,6 @@ def build_agent_graph():
     
     return workflow.compile()
 
-# Initialize agent graph
 agent_graph = build_agent_graph()
 
 # --- RETRIEVAL FUNCTIONS ---
@@ -430,11 +589,13 @@ def cosine_similarity_batch(query_embedding: List[float], chunk_embeddings: np.n
     return similarities
 
 async def retrieve_relevant_chunks(query: str, top_k: int = 5) -> List[str]:
-    """Retrieve most relevant document chunks"""
+    """Retrieve most relevant document chunks using Nomic embeddings"""
     if not document_chunks:
         return []
     
-    query_embeddings = await generate_embeddings_batch([query])
+    prefixed_query = f"search_query: {query}"
+    query_embeddings = await generate_embeddings_batch([prefixed_query])
+    
     if not query_embeddings or len(query_embeddings) == 0:
         return []
     
@@ -474,25 +635,22 @@ async def process_files(files):
     async with file_lock:
         global document_chunks, uploaded_files_info
         
-        await cl.Message(content="🚀 Processing with production-ready Ollama stack...").send()
+        await cl.Message(content="🚀 Processing with vLLM on RTX 5090...").send()
         
         all_text = []
         all_images = []
         
-        # Create a live progress message
         file_progress_msg = cl.Message(content="📂 Starting file processing...")
         await file_progress_msg.send()
         
         last_update_time = time.time()
         
-        # Process files in parallel
         async def process_single_file(file, file_num, total_files):
             file_path = file.path
             file_name = file.name
             
             print(f"\n📄 [{file_num}/{total_files}] Processing: {file_name}")
             
-            # Update UI only periodically
             nonlocal last_update_time
             current_time = time.time()
             if current_time - last_update_time >= UI_UPDATE_INTERVAL or file_num == 1 or file_num == total_files:
@@ -505,11 +663,7 @@ async def process_files(files):
             if file_name.lower().endswith('.pdf'):
                 print(f"📕 Extracting PDF: {file_name}")
                 loop = asyncio.get_event_loop()
-                
-                def extract_with_progress():
-                    return extract_text_from_pdf(file_path)
-                
-                text, images = await loop.run_in_executor(executor, extract_with_progress)
+                text, images = await loop.run_in_executor(executor, extract_text_from_pdf, file_path)
                 print(f"✅ PDF complete: {file_name}")
                 return text, images
             elif file_name.lower().endswith('.docx'):
@@ -547,49 +701,28 @@ async def process_files(files):
         file_progress_msg.content = f"✅ All {total_files} files extracted!"
         await file_progress_msg.update()
         
-        # --- TEXT PROCESSING ---
+        # TEXT PROCESSING
         full_text = "\n\n".join(all_text)
         if full_text.strip():
             chunks = chunk_text_recursive(full_text)
-            print(f"\n📊 Created {len(chunks)} text chunks")
+            print(f"\n📊 Created {len(chunks)} text chunks (6K chars each - optimized for Nomic 8K context)")
             
-            progress_msg = cl.Message(content="⚡ Generating embeddings...")
+            progress_msg = cl.Message(content="⚡ Generating embeddings with Nomic (8K context)...")
             await progress_msg.send()
             
-            last_embed_update = time.time()
+            embeddings = await generate_embeddings_batch(chunks)
             
-            for i in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
-                batch = chunks[i:i + EMBEDDING_BATCH_SIZE]
-                batch_num = i // EMBEDDING_BATCH_SIZE + 1
-                total_batches = (len(chunks) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
-                
-                print(f"⚡ Embedding batch {batch_num}/{total_batches}...")
-                
-                embeddings = await generate_embeddings_batch(batch)
-                
-                if embeddings:
-                    for j, embedding in enumerate(embeddings):
-                        if embedding:
-                            document_chunks.append({
-                                'text': batch[j],
-                                'embedding': embedding
-                            })
-                
-                progress = min(i + EMBEDDING_BATCH_SIZE, len(chunks))
-                
-                # Update UI periodically
-                current_time = time.time()
-                if current_time - last_embed_update >= UI_UPDATE_INTERVAL or batch_num == 1 or batch_num == total_batches:
-                    progress_msg.content = f"⚡ Embeddings: {progress}/{len(chunks)} (batch {batch_num}/{total_batches})"
-                    await progress_msg.update()
-                    last_embed_update = current_time
-                
-                print(f"✅ Batch {batch_num}/{total_batches} complete")
+            if embeddings and len(embeddings) == len(chunks):
+                for j, embedding in enumerate(embeddings):
+                    document_chunks.append({
+                        'text': chunks[j],
+                        'embedding': embedding
+                    })
             
-            progress_msg.content = f"✅ Processed {len(chunks)} text chunks"
+            progress_msg.content = f"✅ Processed {len(chunks)} text chunks with Nomic embeddings"
             await progress_msg.update()
         
-        # --- IMAGE PROCESSING ---
+        # IMAGE PROCESSING
         if all_images:
             vision_msg = cl.Message(content=f"🖼️ Starting image analysis...")
             await vision_msg.send()
@@ -604,37 +737,20 @@ async def process_files(files):
                 combined_images_text = "\n\n".join(image_descriptions)
                 img_chunks = chunk_text_recursive(combined_images_text)
                 
-                print(f"\n📊 Created {len(img_chunks)} image description chunks")
+                print(f"\n📊 Created {len(img_chunks)} image description chunks (6K chars each)")
                 
-                embed_img_msg = cl.Message(content="⚡ Embedding image descriptions...")
+                embed_img_msg = cl.Message(content="⚡ Embedding image descriptions with Nomic...")
                 await embed_img_msg.send()
                 
-                last_img_embed_update = time.time()
+                embeddings = await generate_embeddings_batch(img_chunks)
+                if embeddings and len(embeddings) == len(img_chunks):
+                    for j, embedding in enumerate(embeddings):
+                        document_chunks.append({
+                            'text': img_chunks[j],
+                            'embedding': embedding
+                        })
                 
-                for i in range(0, len(img_chunks), EMBEDDING_BATCH_SIZE):
-                    batch = img_chunks[i:i + EMBEDDING_BATCH_SIZE]
-                    batch_num = i // EMBEDDING_BATCH_SIZE + 1
-                    total_batches = (len(img_chunks) + EMBEDDING_BATCH_SIZE - 1) // EMBEDDING_BATCH_SIZE
-                    
-                    embeddings = await generate_embeddings_batch(batch)
-                    if embeddings:
-                        for j, embedding in enumerate(embeddings):
-                            if embedding:
-                                document_chunks.append({
-                                    'text': batch[j],
-                                    'embedding': embedding
-                                })
-                    
-                    progress = min(i + EMBEDDING_BATCH_SIZE, len(img_chunks))
-                    
-                    # Update UI periodically
-                    current_time = time.time()
-                    if current_time - last_img_embed_update >= UI_UPDATE_INTERVAL or batch_num == 1 or batch_num == total_batches:
-                        embed_img_msg.content = f"⚡ Image embeddings: {progress}/{len(img_chunks)} (batch {batch_num}/{total_batches})"
-                        await embed_img_msg.update()
-                        last_img_embed_update = current_time
-                
-                embed_img_msg.content = f"✅ Embedded {len(img_chunks)} image description chunks"
+                embed_img_msg.content = f"✅ Embedded {len(img_chunks)} image description chunks with Nomic"
                 await embed_img_msg.update()
         
         await cl.Message(
@@ -644,11 +760,14 @@ async def process_files(files):
                     f"• Files processed: **{len(uploaded_files_info)}**\n"
                     f"• Text chunks: **{len([c for c in document_chunks if 'Image' not in c['text'][:10]])}**\n"
                     f"• Image descriptions: **{len([c for c in document_chunks if 'Image' in c['text'][:10]])}**\n\n"
-                    f"⚙️ **Configuration:**\n"
-                    f"• Vision concurrency: **{VISION_CONCURRENT_LIMIT}**\n"
-                    f"• Embedding batch: **{EMBEDDING_BATCH_SIZE}**\n"
-                    f"• Ollama parallel: **4** requests\n"
-                    f"• Keep-alive: **30 minutes**\n\n"
+                    f"⚙️ **RTX 5090 Configuration:**\n"
+                    f"• Vision Model: **{VISION_MODEL}** (port 8006)\n"
+                    f"• Reasoning Model: **{REASONING_MODEL}** (port 8005)\n"
+                    f"• Vision concurrency: **{VISION_CONCURRENT_LIMIT}** (GDDR7 optimized)\n"
+                    f"• Embedding: **{EMBEDDING_MODEL_NAME}** (CUDA, batched)\n"
+                    f"• Context window: **{MODEL_MAX_TOKENS}** tokens (Input: {MAX_INPUT_TOKENS}, Output: {MAX_OUTPUT_TOKENS})\n"
+                    f"• Chunk size: **6000 chars** (optimized for Nomic)\n"
+                    f"• Smart context truncation: **Enabled**\n\n"
                     f"💡 **Commands:**\n"
                     f"• `/clear` - Delete all documents\n"
                     f"• `/files` - View loaded documents"
@@ -659,15 +778,16 @@ async def process_files(files):
 @cl.on_chat_start
 async def start():
     files = await cl.AskFileMessage(
-        content="Welcome to Production-Ready RAG! 🚀\n\n"
-                "**Enhanced Features:**\n"
-                f"✨ LLM: {LLM_MODEL}\n"
-                f"🔍 Vision: {VISION_MODEL} ({VISION_CONCURRENT_LIMIT} concurrent)\n"
-                f"📊 Embeddings: {EMBEDDING_MODEL}\n"
+        content="Welcome to vLLM-Powered RAG! 🚀\n\n"
+                "**RTX 5090 Enterprise Configuration:**\n"
+                f"✨ Reasoning: {REASONING_MODEL} (vLLM port 8005)\n"
+                f"🔍 Vision: {VISION_MODEL} (vLLM port 8006)\n"
+                f"📊 Embeddings: Nomic Embed Text v1.5 (8K context!)\n"
                 f"🤖 LangGraph agentic reasoning\n"
-                f"🔒 Semaphore-based thread safety\n"
-                f"⚡ Ollama parallel requests: 4\n"
-                f"🕐 Model keep-alive: 30 minutes\n\n"
+                f"🔒 Thread-safe concurrent processing\n"
+                f"⚡ {VISION_CONCURRENT_LIMIT}x concurrent vision analysis\n"
+                f"🎯 Smart context window management (auto-truncation)\n"
+                f"📈 Larger chunks (6K chars) for better context\n\n"
                 "**File Management:**\n"
                 "• Upload files anytime\n"
                 "• `/clear` to delete all documents\n"
@@ -686,7 +806,7 @@ async def start():
 async def on_message(message: cl.Message):
     global document_chunks, uploaded_files_info
     
-    # --- HANDLE COMMANDS ---
+    # HANDLE COMMANDS
     if message.content.strip().lower() == '/clear':
         await clear_all_documents()
         return
@@ -695,14 +815,13 @@ async def on_message(message: cl.Message):
         await show_uploaded_files()
         return
     
-    # --- HANDLE FILE UPLOADS ---
+    # HANDLE FILE UPLOADS
     if message.elements:
         await process_files(message.elements)
         return
     
-    # --- HANDLE REGULAR MESSAGES WITH LANGGRAPH ---
-    
-    thinking_msg = cl.Message(content="🤔 Reasoning through your question...")
+    # HANDLE REGULAR MESSAGES WITH STREAMING
+    thinking_msg = cl.Message(content="")
     await thinking_msg.send()
     
     # Initialize agent state
@@ -714,18 +833,36 @@ async def on_message(message: cl.Message):
         "error": None
     }
     
-    # Run the agentic workflow
-    final_state = await agent_graph.ainvoke(initial_state)
+    # Run retrieval and reasoning nodes
+    state_after_retrieval = await retrieve_context_node(initial_state)
+    state_after_reasoning = await reasoning_node(state_after_retrieval)
     
-    # Display reasoning steps (optional, for transparency)
-    reasoning_text = "\n".join(final_state['reasoning_steps'])
-    print(f"Reasoning Steps:\n{reasoning_text}")
+    # Prepare messages for streaming
+    messages = [{"role": "system", "content": system_prompt_content}]
     
-    if final_state['final_answer']:
-        thinking_msg.content = final_state['final_answer']
+    if state_after_reasoning['retrieved_chunks']:
+        context_text = "\n\n---DOCUMENT CONTEXT---\n" + "\n\n".join(state_after_reasoning['retrieved_chunks']) + "\n---END CONTEXT---\n"
+        messages.append({"role": "system", "content": context_text})
+    
+    for user_msg, assistant_msg in conversation_history[-5:]:
+        messages.append({"role": "user", "content": user_msg})
+        messages.append({"role": "assistant", "content": assistant_msg})
+    
+    messages.append({"role": "user", "content": message.content})
+    
+    # Stream the response with automatic context management
+    stream = await generate_completion_stream(messages)
+    
+    if stream:
+        full_response = ""
+        async for chunk in stream:
+            if chunk.choices[0].delta.content:
+                token = chunk.choices[0].delta.content
+                full_response += token
+                await thinking_msg.stream_token(token)
+        
         await thinking_msg.update()
-        conversation_history.append((message.content, final_state['final_answer']))
+        conversation_history.append((message.content, full_response))
     else:
-        error_msg = final_state.get('error', 'Unknown error')
-        thinking_msg.content = f"❌ Error: {error_msg}\n\nReasoning:\n{reasoning_text}"
+        thinking_msg.content = "❌ Error generating response"
         await thinking_msg.update()
