@@ -4,6 +4,17 @@ This guide provides the full consolidated workflow for managing your dual-model 
 
 ---
 
+## 0. Runpod Setup Settings:
+
+Make sure to expose HTTP Ports: 8000 so that you can access it.
+
+Make sure you have a pod that you can scp/ftp files over SSH.
+
+I used a **Pytorch 2.80** template, but I think it would work with any template as long as you install Pytorch.
+
+The building template for VLLM took me **OVER AN HOUR AND A HALF** so be patient with it.
+
+
 ## 1. Local Machine: Connection & Deployment
 
 To connect to your Pod and transfer files, follow the official configuration steps.
