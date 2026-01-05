@@ -71,6 +71,7 @@ pip install -e . --no-build-isolation
 
 # 3. Install remaining UI & Processing tools
 pip install hf_transfer tiktoken sentence-transformers uvloop chainlit openai
+pip install -r requirements.txt
 
 ```
 
