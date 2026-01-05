@@ -15,7 +15,7 @@ For instructions on generating SSH keys, adding them to your RunPod account, and
 
 ### B. Deployment Command (Rsync)
 
-Run this command from your **local terminal** to synchronize your project folder to the server.
+Edit and Run this command from your **local terminal** to synchronize your project folder to the server. Edit according the address, ports, home and destintation folder.
 
 ```bash
 # Sync project while skipping large model/env folders to save time
