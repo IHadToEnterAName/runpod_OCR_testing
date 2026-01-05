@@ -1,58 +1,94 @@
+# 🚀 RTX 5090 Corporate AI Assistant: Master Documentation
+
+This guide provides the full consolidated workflow for managing your dual-model (Reasoning + Vision) system on an **RTX 5090**.
 
 ---
 
-# Corporate Document Assistant: RTX 5090 (vLLM + RAG + Vision)
+## 1. Local Machine: Connection & Deployment
 
-This repository contains a high-performance AI assistant optimized for an **RTX 5090 (32GB VRAM)**. It utilizes dual **vLLM** servers for reasoning and vision, alongside **SentenceTransformers** for local RAG, designed to process massive corporate datasets with ultra-low latency.
+To connect to your Pod and transfer files, follow the official configuration steps.
 
-## 🚀 Optimized Model Stack
+### A. SSH Setup
 
-* **Reasoning Model:** `DeepSeek-R1-Distill-Qwen-1.5B` (Running on Port 8005)
-* **Vision Model:** `Qwen2.5-VL-3B-Instruct` (Running on Port 8006)
-* **Embedding Model:** `nomic-ai/nomic-embed-text-v1.5` (Local GPU-accelerated)
+For instructions on generating SSH keys, adding them to your RunPod account, and establishing a secure connection, refer to the official documentation:
+👉 **[RunPod SSH Configuration Guide](https://docs.runpod.io/pods/configuration/use-ssh)**
 
----
+### B. Deployment Command (Rsync)
 
-## 🛠️ Installation & Setup
-
-### 1. Environment Configuration
-
-Ensure your Python environment is ready and your workspace (400TB volume) is targeted for model storage.
+Run this command from your **local terminal** to synchronize your project folder to the server.
 
 ```bash
-# Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate
+# Sync project while skipping large model/env folders to save time
+rsync -avz --exclude 'venv' --exclude 'huggingface' --exclude '.git' \
+-e "ssh -p 53834 -i ~/.ssh/id_ed25519" \
+/home/nasih/runpod_testing/OCR_LLM/vllm_inference_llama3/ \
+root@157.157.221.29:/workspace/vllm_inference_llama3
 
-# Set model storage to the large workspace volume
+```
+
+---
+
+## 2. Remote Server: Storage & Environment Prep
+
+Run these commands inside your RunPod terminal once to prepare the persistent 400TB volume.
+
+```bash
+# 1. Initialize persistent storage paths
+mkdir -p /workspace/huggingface
+mkdir -p /workspace/vllm_cache
+mkdir -p /workspace/data
+
+# 2. Set persistent environment variables
 export HF_HOME="/workspace/huggingface"
+export VLLM_CACHE_ROOT="/workspace/vllm_cache"
 export HF_HUB_ENABLE_HF_TRANSFER=1
 
-```
-
-### 2. Dependency Installation
-
-Install the Blackwell-optimized stack, including vision and token-trimming libraries.
-
-```bash
-pip install torchvision hf_transfer tiktoken sentence-transformers uvloop chainlit openai
+# 3. Virtual Environment Setup
+python3 -m venv /workspace/venv
+source /workspace/venv/bin/activate
+pip install --upgrade pip setuptools wheel
 
 ```
 
 ---
 
-## 🛰️ Launching the Inference Servers
+## 3. Remote Server: Installation (Blackwell Optimized)
 
-Because the RTX 5090 is on the Blackwell architecture, we use specific flags to ensure stability and prevent Out-of-Memory (OOM) errors during dual-model execution.
-
-### Server 1: Vision-Language Model (Port 8006)
-
-This handles OCR and image analysis. **Launch this first.**
+The RTX 5090 requires specific builds to unlock the Blackwell architecture (`sm_120`).
 
 ```bash
+# 1. Install Nightly PyTorch (CUDA 12.8+ support)
+pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+
+# 2. Build vLLM from Source
+cd /workspace
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+pip install -r requirements-build.txt
+export TORCH_CUDA_ARCH_LIST="12.0"
+export MAX_JOBS=12 
+pip install -e . --no-build-isolation
+
+# 3. Install remaining UI & Processing tools
+pip install hf_transfer tiktoken sentence-transformers uvloop chainlit openai
+
+```
+
+---
+
+## 4. Launching the Inference Servers
+
+Open two separate terminals (or use `screen`/`tmux`) to run these backends.
+
+### Terminal 1: Vision Model (Port 8006)
+
+**Launch this first.** Handles OCR and image analysis.
+
+```bash
+source /workspace/venv/bin/activate
 VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
     --port 8006 \
-    --gpu-memory-utilization 0.45 \
+    --gpu-memory-utilization 0.35 \
     --max-model-len 8192 \
     --limit-mm-per-prompt '{"image":12}' \
     --enforce-eager \
@@ -60,15 +96,16 @@ VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
 
 ```
 
-### Server 2: Reasoning Model (Port 8005)
+### Terminal 2: Reasoning Model (Port 8005)
 
-This handles document analysis and complex logic.
+Handles deep document analysis and complex logic.
 
 ```bash
+source /workspace/venv/bin/activate
 VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
     --port 8005 \
     --gpu-memory-utilization 0.30 \
-    --max-model-len 8192 \
+    --max-model-len 32768 \
     --enforce-eager \
     --enable-prefix-caching
 
@@ -76,84 +113,29 @@ VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
 
 ---
 
-## 🖥️ Running the Application
+## 5. Running the Chat Interface
 
-### Deploying Code (Rsync)
-
-If working from a local machine, sync your project to the RunPod instance (replace with your current port/IP):
+Once both servers show `Uvicorn running`, launch your application UI.
 
 ```bash
-rsync -avz --exclude 'venv' --exclude 'huggingface' -e "ssh -p 53834 -i ~/.ssh/id_ed25519" ./project_folder root@157.157.221.29:/workspace/
-
-```
-
-### Starting the Chat UI
-
-Launch the Chainlit interface once both vLLM servers show `Uvicorn running`.
-
-```bash
+source /workspace/venv/bin/activate
+cd /workspace/vllm_inference_llama3
 chainlit run chat.py --host 0.0.0.0 --port 8000
 
 ```
 
 ---
 
-## 📈 System Health & Management
+## 📈 System Maintenance
 
-### Port Cleanup
-
-If you encounter "Address already in use" errors:
-
+* **VRAM Monitor:** `watch -n 1 nvidia-smi`
+* **Hard Reset (Clean all AI processes):**
 ```bash
-pkill -9 python
-pkill -9 vllm
-rm -rf /tmp/vllm_*
+pkill -9 python && pkill -9 vllm && rm -rf /tmp/vllm_*
 
 ```
 
-### Resource Monitoring
 
-Monitor your 32GB VRAM allocation across the two vLLM processes:
-
-```bash
-watch -n 1 nvidia-smi
-
-```
-
-## 📂 Project Structure
-
-```text
-├── chat.py             # Logic for Port 8005/8006 routing & RAG
-├── requirements.txt    # Updated with tiktoken and torchvision
-├── venv/               # Local virtual environment
-└── huggingface/        # 400TB storage for model weights
-
-```
-
-0. Storage & Cache Initialization
-Run these commands first to prepare the persistent volume. This prevents the small root partition from filling up and ensures you don't have to re-download models if the pod restarts.
-
-Bash
-
-# Create the directory for HuggingFace model weights
-mkdir -p /workspace/huggingface
-
-# Create the directory for vLLM's internal compilation & kernel cache
-mkdir -p /workspace/vllm_cache
-
-# Create the directory for your uploaded documents and processed images
-mkdir -p /workspace/data
-1. Linking Directories to the System
-We use environment variables to tell the AI libraries to use these specific folders on the large disk.
-
-Bash
-
-# Point HuggingFace to the 400TB volume
-export HF_HOME="/workspace/huggingface"
-
-# Point vLLM's compiler to the persistent cache folder
-# This speeds up subsequent launches of the Vision model
-export VLLM_CACHE_ROOT="/workspace/vllm_cache"
+* **Wipe Kernels Cache:** `rm -rf /workspace/vllm_cache/*`
 
 ---
-
