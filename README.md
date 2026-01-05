@@ -1,118 +1,92 @@
+This updated documentation replaces the Ollama-based setup with your current high-performance vLLM configuration, optimized specifically for the RTX 5090.
 
-# Corporate Document Assistant Using Runpod GPU Server (RAG + Vision)
+Corporate Document Assistant: RTX 5090 (vLLM + RAG + Vision)
+This repository contains a high-performance AI assistant optimized for an RTX 5090 (32GB VRAM). It utilizes dual vLLM servers for reasoning and vision, alongside SentenceTransformers for local RAG, designed to process massive corporate datasets with ultra-low latency.
 
-This repository contains a professional AI assistant designed for corporate document analysis and information retrieval. The system utilizes Retrieval-Augmented Generation (RAG) and Vision-Language Models to process text, structured documents, and visual data from PDF, DOCX, and image files. This was tested using a **RTX 5090 GPU**.
+🚀 Optimized Model Stack
+Reasoning Model: DeepSeek-R1-Distill-Qwen-1.5B (Running on Port 8005)
 
-## Overview
+Vision Model: Qwen2.5-VL-3B-Instruct (Running on Port 8006)
 
-The application enables users to upload corporate documents and query them using natural language. It performs the following technical operations:
+Embedding Model: nomic-ai/nomic-embed-text-v1.5 (Local GPU-accelerated)
 
-* **Semantic Extraction:** Uses PyMuPDF and python-docx for high-fidelity text extraction.
-* **Visual Analysis:** Employs Llama 3.2 Vision to perform OCR and describe visual elements such as charts and diagrams.
-* **Efficient Indexing:** Implements recursive character splitting and batch embedding generation via Ollama.
-* **Fast Retrieval:** Uses vectorized NumPy operations to calculate cosine similarity for relevant context retrieval.
+🛠️ Installation & Setup
+1. Environment Configuration
+Ensure your Python environment is ready and your workspace (400TB volume) is targeted for model storage.
 
----
+Bash
 
-## Technical Stack
-
-* **Language Model:** Mistral-7B
-* **Vision Model:** Llama-3.2-Vision
-* **Embedding Model:** Nomic-Embed-Text
-* **Orchestration:** Chainlit
-* **Processing:** NumPy, PyMuPDF, LangChain Text Splitters
-
----
-
-## Installation and Setup
-
-### 1. Environment Configuration
-
-It is highly recommended to use a Python virtual environment to isolate project dependencies.
-
-**Create and Activate Virtual Environment:**
-
-On macOS/Linux:
-
-```bash
+# Create and activate virtual environment
 python3 -m venv venv
 source venv/bin/activate
 
-```
+# Set model storage to the large workspace volume
+export HF_HOME="/workspace/huggingface"
+export HF_HUB_ENABLE_HF_TRANSFER=1
+2. Dependency Installation
+Install the Blackwell-optimized stack, including vision and token-trimming libraries.
 
-On Windows:
+Bash
 
-```bash
-python -m venv runpod_test
-venv runpod_test/bin/activate
+pip install torchvision hf_transfer tiktoken sentence-transformers uvloop chainlit openai
+🛰️ Launching the Inference Servers
+Because the RTX 5090 is on the Blackwell architecture, we use specific flags to ensure stability and prevent Out-of-Memory (OOM) errors during dual-model execution.
 
-```
+Server 1: Vision-Language Model (Port 8006)
+This handles OCR and image analysis. Launch this first.
 
-### 2. Dependency Installation
+Bash
 
-Once the virtual environment is activated, install the required libraries:
+VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
+    --port 8006 \
+    --gpu-memory-utilization 0.35 \
+    --max-model-len 8192 \
+    --limit-mm-per-prompt '{"image":12}' \
+    --enforce-eager \
+    --trust-remote-code
+Server 2: Reasoning Model (Port 8005)
+This handles document analysis and complex logic.
 
-```bash
-pip install -r requirements.txt
+Bash
 
-```
+VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
+    --port 8005 \
+    --gpu-memory-utilization 0.30 \
+    --max-model-len 32768 \
+    --enforce-eager \
+    --enable-prefix-caching
+🖥️ Running the Application
+Deploying Code (Rsync)
+If working from a local machine, sync your project to the RunPod instance (replace with your current port/IP):
 
-### 3. Model Configuration
+Bash
 
-Ensure you have [Ollama](https://ollama.com/) installed and running. Pull the necessary models before starting the application:
+rsync -avz --exclude 'venv' --exclude 'huggingface' -e "ssh -p 53834 -i ~/.ssh/id_ed25519" ./project_folder root@157.157.221.29:/workspace/
+Starting the Chat UI
+Launch the Chainlit interface once both vLLM servers show Uvicorn running.
 
-```bash
-ollama pull mistral
-ollama pull llama3.2-vision
-ollama pull nomic-embed-text
+Bash
 
-```
+chainlit run chat.py --host 0.0.0.0 --port 8000
+📈 System Health & Management
+Port Cleanup
+If you encounter "Address already in use" errors:
 
----
+Bash
 
-## Deployment Instructions
+pkill -9 python
+pkill -9 vllm
+rm -rf /tmp/vllm_*
+Resource Monitoring
+Monitor your 32GB VRAM allocation across the two vLLM processes:
 
-### Local Execution
+Bash
 
-To run the application locally, execute the following command:
+watch -n 1 nvidia-smi
+📂 Project Structure
+Plaintext
 
-```bash
-chainlit run chat.py
-
-```
-
-### RunPod Deployment
-
-When deploying on a RunPod GPU instance, you must configure the host and port to allow external access through the proxy.
-
-1. **Configure Base URL:**
-Update the `base_url` variable in `chat.py` with your unique RunPod Proxy URL (e.g., `https://[POD_ID]-11434.proxy.runpod.net`).
-2. **Execute App:**
-```bash
-chainlit run chat.py
-
-```
-
-
-3. **Access UI:**
-Access the interface via the RunPod proxy link provided using the local host link.
-
----
-
-## Usage Guide
-
-1. **Initialization:** Upon starting the application, you will be prompted to upload your source files.
-2. **Processing:** The system will automatically chunk the text and generate embeddings. If images are detected, the vision model will generate descriptions to be indexed.
-3. **Interaction:** Enter your queries in the chat interface. The system will retrieve the most relevant document segments to provide a context-aware response.
-
----
-
-## Project Structure
-
-```text
-├── chat.py             # Main application logic
-├── requirements.txt    # Project dependencies
-├── .gitignore          # Git exclusion rules
-└── .chainlit/          # Chainlit configuration files
-
-```
+├── chat.py             # Logic for Port 8005/8006 routing & RAG
+├── requirements.txt    # Updated with tiktoken and torchvision
+├── venv/               # Local virtual environment
+└── huggingface/        # 400TB storage for model weights
