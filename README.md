@@ -52,7 +52,7 @@ This handles OCR and image analysis. **Launch this first.**
 ```bash
 VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
     --port 8006 \
-    --gpu-memory-utilization 0.35 \
+    --gpu-memory-utilization 0.45 \
     --max-model-len 8192 \
     --limit-mm-per-prompt '{"image":12}' \
     --enforce-eager \
@@ -68,7 +68,7 @@ This handles document analysis and complex logic.
 VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
     --port 8005 \
     --gpu-memory-utilization 0.30 \
-    --max-model-len 32768 \
+    --max-model-len 8192 \
     --enforce-eager \
     --enable-prefix-caching
 
