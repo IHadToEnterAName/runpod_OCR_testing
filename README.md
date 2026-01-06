@@ -2,6 +2,102 @@
 
 This guide provides the full consolidated workflow for managing your dual-model (Reasoning + Vision) system on an **RTX 5090**.
 
+
+## New Commands
+
+| Command | Description |
+|---------|-------------|
+| `/clear` | Delete all documents AND reset context anchor |
+| `/files` | View loaded documents |
+| `/status` | View context anchor status (turns, summaries, etc.) |
+
+---
+
+## Architecture Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     USER MESSAGE                                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  CONTEXT ANCHOR                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐             │
+│  │  Summary    │  │  Key Facts  │  │  Recent     │             │
+│  │  Buffer     │  │  Storage    │  │  Turns      │             │
+│  └─────────────┘  └─────────────┘  └─────────────┘             │
+│                         │                                       │
+│              System Prompt Re-injection                         │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              ANCHORED SYSTEM PROMPT                             │
+│  • Base prompt + Language constraints + Core instructions       │
+│  • Conversation summaries + Key facts                           │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                 DOCUMENT RETRIEVAL (RAG)                        │
+│  • Top-K relevant chunks from vector store                      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              SMART TRUNCATION                                   │
+│  • Fit within MAX_INPUT_TOKENS (12,288)                         │
+│  • Priority: System > Query > Recent > Older                    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              DEEPSEEK R1 GENERATION                             │
+│  • MAX_OUTPUT_TOKENS = 4,096                                    │
+│  • Streaming with real-time language filter                     │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+         ┌────────────────────┴────────────────────┐
+         │                                          │
+    finish_reason                              finish_reason
+      = "stop"                                   = "length"
+         │                                          │
+         ▼                                          ▼
+┌─────────────────┐                    ┌─────────────────────────┐
+│  Complete       │                    │  AUTO-CONTINUATION      │
+│  Response       │                    │  • Create continuation  │
+│                 │                    │    prompt               │
+│                 │                    │  • Loop until complete  │
+│                 │                    │    or MAX_ROUNDS        │
+└─────────────────┘                    └─────────────────────────┘
+         │                                          │
+         └────────────────────┬────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   LANGUAGE FILTER                               │
+│  • Remove any CJK characters that slipped through               │
+│  • Log warnings for monitoring                                  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              UPDATE CONTEXT ANCHOR                              │
+│  • Add turn to conversation history                             │
+│  • Trigger summarization if needed                              │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    USER RESPONSE                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+
 ---
 
 ## 0. Runpod Setup Settings:
