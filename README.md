@@ -213,7 +213,7 @@ source /workspace/venv/bin/activate
 VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
     --port 8005 \
     --gpu-memory-utilization 0.30 \
-    --max-model-len 32768 \
+    --max-model-len 65536 \
     --enforce-eager \
     --enable-prefix-caching
 
