@@ -3,7 +3,7 @@
 This guide provides the full consolidated workflow for managing your dual-model (Reasoning + Vision) system on an **RTX 5090**.
 
 
-## New Commands
+## Commands
 
 | Command | Description |
 |---------|-------------|
