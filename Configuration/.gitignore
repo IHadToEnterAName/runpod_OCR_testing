@@ -1,0 +1,100 @@
+# Python junk
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environments (Where secrets live)
+.env
+.venv
+env/
+venv/
+
+# Chainlit/Local state
+.chainlit/config.toml
+.chainlit/auth
+.chainlit/sessions
+
+# Large Data (Optional - prevents accidental large uploads)
+*.pdf
+*.docx
+
+
+# Environment
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker volumes
+data/uploads/*
+data/processed/*
+data/failed/*
+!data/uploads/.gitkeep
+!data/processed/.gitkeep
+!data/failed/.gitkeep
+
+# Logs
+*.log
+logs/
+airflow/logs/
+
+# Cache
+.cache/
+.pytest_cache/
+.ruff_cache/
+
+# Model cache
+huggingface/
+*.bin
+*.safetensors
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Database
+*.db
+*.sqlite
+
+# Temporary
+tmp/
+temp/
+*.tmp

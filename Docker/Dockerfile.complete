@@ -1,0 +1,140 @@
+# =============================================================================
+# RAG System Dockerfile - RTX 5090 Optimized with vLLM
+# =============================================================================
+# Base: NVIDIA CUDA 12.8 for Blackwell architecture (sm_120)
+FROM nvidia/cuda:12.6.0-cudnn-devel-ubuntu22.04
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set working directory
+WORKDIR /workspace
+
+# =============================================================================
+# SYSTEM DEPENDENCIES
+# =============================================================================
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    python3-dev \
+    build-essential \
+    git \
+    curl \
+    wget \
+    libgomp1 \
+    openssh-client \
+    rsync \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create Python 3.10 as default
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python
+
+# Upgrade pip
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# =============================================================================
+# PYTORCH NIGHTLY (CUDA 12.8 Support for Blackwell)
+# =============================================================================
+RUN pip install --no-cache-dir --pre \
+    torch \
+    torchvision \
+    torchaudio \
+    --index-url https://download.pytorch.org/whl/nightly/cu128
+
+# =============================================================================
+# BUILD vLLM FROM SOURCE (Blackwell sm_120 support)
+# =============================================================================
+RUN git clone https://github.com/vllm-project/vllm.git /tmp/vllm && \
+    cd /tmp/vllm && \
+    pip install -r requirements-build.txt && \
+    TORCH_CUDA_ARCH_LIST="12.0" MAX_JOBS=12 pip install -e . --no-build-isolation && \
+    cd / && rm -rf /tmp/vllm
+
+# =============================================================================
+# RAG DEPENDENCIES
+# =============================================================================
+RUN pip install --no-cache-dir \
+    # Core ML
+    transformers==4.36.2 \
+    sentence-transformers==2.3.1 \
+    tiktoken==0.5.2 \
+    # LangChain
+    langchain==0.1.0 \
+    langchain-community==0.0.10 \
+    langchain-core==0.1.10 \
+    langchain-text-splitters==0.0.1 \
+    # Vector DB
+    chromadb==0.4.22 \
+    # Document processing
+    pymupdf==1.23.8 \
+    python-docx==1.1.0 \
+    pypdf==3.17.4 \
+    pillow==10.1.0 \
+    # Web framework
+    chainlit==1.0.0 \
+    openai==1.6.1 \
+    httpx==0.25.2 \
+    # Utilities
+    numpy==1.24.3 \
+    pandas==2.0.3 \
+    pydantic==2.5.3 \
+    python-dotenv==1.0.0 \
+    # HuggingFace optimization
+    hf-transfer \
+    uvloop
+
+# =============================================================================
+# CREATE DIRECTORY STRUCTURE
+# =============================================================================
+RUN mkdir -p \
+    /workspace/src \
+    /workspace/data/uploads \
+    /workspace/data/processed \
+    /workspace/data/failed \
+    /workspace/huggingface \
+    /workspace/chroma_db \
+    /workspace/models
+
+# =============================================================================
+# ENVIRONMENT VARIABLES
+# =============================================================================
+ENV PYTHONPATH=/workspace/src:$PYTHONPATH \
+    HF_HOME=/workspace/huggingface \
+    TRANSFORMERS_CACHE=/workspace/huggingface \
+    VLLM_CACHE_ROOT=/workspace/vllm_cache \
+    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    CUDA_VISIBLE_DEVICES=0 \
+    TORCH_CUDA_ARCH_LIST="12.0"
+
+# =============================================================================
+# COPY APPLICATION CODE
+# =============================================================================
+COPY src/ /workspace/src/
+
+# =============================================================================
+# CREATE NON-ROOT USER (Security)
+# =============================================================================
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /workspace
+
+USER appuser
+
+# =============================================================================
+# EXPOSE PORTS
+# =============================================================================
+# 8000: Chainlit app
+# 8005: vLLM Reasoning server
+# 8006: vLLM Vision server
+EXPOSE 8000 8005 8006
+
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000 || exit 1
+
+# =============================================================================
+# DEFAULT COMMAND
+# =============================================================================
+# This will be overridden by docker-compose for different services
+CMD ["python", "-m", "chainlit", "run", "/workspace/src/app.py", "--host", "0.0.0.0", "--port", "8000"]

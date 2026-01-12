@@ -1,0 +1,287 @@
+version: '3.8'
+
+# =============================================================================
+# Production RAG Stack - Updated for Your vLLM Configuration
+# Optimized for RTX 5090 with your proven server settings
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # REDIS STACK - Caching and State Persistence
+  # ===========================================================================
+  redis:
+    image: redis/redis-stack:7.2.0-v6
+    container_name: rag_redis
+    ports:
+      - "6379:6379"
+      - "8001:8001"  # RedisInsight UI
+    volumes:
+      - redis_data:/data
+    environment:
+      - REDIS_ARGS=--save 60 1 --loglevel warning
+    command: redis-stack-server
+    restart: unless-stopped
+    networks:
+      - rag_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # ===========================================================================
+  # CHROMADB - Vector Database
+  # ===========================================================================
+  chromadb:
+    image: chromadb/chroma:0.4.22
+    container_name: rag_chromadb
+    ports:
+      - "8000:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    restart: unless-stopped
+    networks:
+      - rag_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # AIRFLOW - Document Ingestion Pipeline
+  # ===========================================================================
+  
+  # Postgres for Airflow metadata
+  airflow_postgres:
+    image: postgres:15
+    container_name: rag_airflow_db
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - airflow_postgres_data:/var/lib/postgresql/data
+    networks:
+      - rag_network
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Airflow webserver
+  airflow_webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag_airflow_webserver
+    depends_on:
+      airflow_postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow_postgres/airflow
+      - AIRFLOW__CORE__FERNET_KEY=FB0o_zt4e3Ziq3LdUUO7F2Z95cvFFx16hU8jTeR1ASM=
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=secret_key_change_in_production
+      - AIRFLOW__WEBSERVER__EXPOSE_CONFIG=True
+      
+      # Service connections
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      
+      # vLLM endpoints (using your exact ports)
+      - VISION_URL=http://host.docker.internal:8006/v1
+      - REASONING_URL=http://host.docker.internal:8005/v1
+      
+      # Model configuration (your exact models)
+      - VISION_MODEL=Qwen/Qwen2.5-VL-3B-Instruct
+      - REASONING_MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      - EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
+      
+      - VISION_ENABLED=true
+      - HF_HOME=/workspace/huggingface
+    volumes:
+      - ./src/airflow/dags:/workspace/airflow/dags
+      - ./data:/workspace/data
+      - airflow_logs:/workspace/airflow/logs
+      - huggingface_cache:/workspace/huggingface
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "
+      airflow db init &&
+      airflow users create --username admin --firstname Admin --lastname User --role Admin --email admin@example.com --password admin &&
+      airflow webserver
+      "
+    restart: unless-stopped
+    networks:
+      - rag_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Airflow scheduler
+  airflow_scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag_airflow_scheduler
+    depends_on:
+      - airflow_webserver
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@airflow_postgres/airflow
+      - AIRFLOW__CORE__FERNET_KEY=FB0o_zt4e3Ziq3LdUUO7F2Z95cvFFx16hU8jTeR1ASM=
+      
+      # Service connections
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      - VISION_URL=http://host.docker.internal:8006/v1
+      - REASONING_URL=http://host.docker.internal:8005/v1
+      
+      # Model configuration
+      - VISION_MODEL=Qwen/Qwen2.5-VL-3B-Instruct
+      - REASONING_MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      - EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
+      - VISION_ENABLED=true
+      - HF_HOME=/workspace/huggingface
+    volumes:
+      - ./src/airflow/dags:/workspace/airflow/dags
+      - ./data:/workspace/data
+      - airflow_logs:/workspace/airflow/logs
+      - huggingface_cache:/workspace/huggingface
+    command: airflow scheduler
+    restart: unless-stopped
+    networks:
+      - rag_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # ===========================================================================
+  # RAG APPLICATION - Chainlit + LangGraph Agent
+  # ===========================================================================
+  rag_app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag_app
+    depends_on:
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    environment:
+      # Service connections
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CHROMA_HOST=chromadb
+      - CHROMA_PORT=8000
+      
+      # vLLM endpoints (your exact configuration)
+      - VISION_URL=http://host.docker.internal:8006/v1
+      - REASONING_URL=http://host.docker.internal:8005/v1
+      
+      # Model configuration (your exact models)
+      - VISION_MODEL=Qwen/Qwen2.5-VL-3B-Instruct
+      - REASONING_MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      - EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
+      
+      # Cache settings
+      - CACHE_SIMILARITY_THRESHOLD=0.95
+      - CACHE_TTL_SECONDS=3600
+      
+      # Environment
+      - PYTHONPATH=/workspace/src
+      - HF_HOME=/workspace/huggingface
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ./src:/workspace/src
+      - ./data:/workspace/data
+      - huggingface_cache:/workspace/huggingface
+      - chroma_data:/workspace/chroma_db
+    ports:
+      - "7860:8000"
+    command: python -m chainlit run /workspace/src/app.py --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    networks:
+      - rag_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 16G
+
+# =============================================================================
+# VOLUMES - Data Persistence
+# =============================================================================
+volumes:
+  redis_data:
+    driver: local
+  chroma_data:
+    driver: local
+  airflow_postgres_data:
+    driver: local
+  airflow_logs:
+    driver: local
+  huggingface_cache:
+    driver: local
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  rag_network:
+    driver: bridge
+
+# =============================================================================
+# NOTES - Your vLLM Server Configuration
+# =============================================================================
+# 
+# Run these on your host machine before starting Docker:
+#
+# Terminal 1 - Vision Model (Port 8006):
+# source /workspace/venv/bin/activate
+# VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
+#     --port 8006 \
+#     --gpu-memory-utilization 0.3 \
+#     --max-model-len 8192 \
+#     --limit-mm-per-prompt '{"image":12}' \
+#     --enforce-eager \
+#     --trust-remote-code
+#
+# Terminal 2 - Reasoning Model (Port 8005):
+# source /workspace/venv/bin/activate
+# VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
+#     --port 8005 \
+#     --gpu-memory-utilization 0.53 \
+#     --max-model-len 16384 \
+#     --enforce-eager \
+#     --enable-prefix-caching
+#
+# =============================================================================
