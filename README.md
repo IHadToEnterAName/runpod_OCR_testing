@@ -196,7 +196,7 @@ Open two separate terminals (or use `screen`/`tmux`) to run these backends.
 source /workspace/venv/bin/activate
 VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
     --port 8006 \
-    --gpu-memory-utilization 0.4 \
+    --gpu-memory-utilization 0.3 \
     --max-model-len 8192 \
     --limit-mm-per-prompt '{"image":12}' \
     --enforce-eager \
@@ -212,8 +212,8 @@ Handles deep document analysis and complex logic.
 source /workspace/venv/bin/activate
 VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
     --port 8005 \
-    --gpu-memory-utilization 0.35 \
-    --max-model-len 65536 \
+    --gpu-memory-utilization 0.53 \
+    --max-model-len 16384 \
     --enforce-eager \
     --enable-prefix-caching
 
