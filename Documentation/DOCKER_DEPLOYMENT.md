@@ -118,7 +118,7 @@ vllm_vision:
   device_ids: ['0']  # GPU 0, 0.3 utilization
 
 vllm_reasoning:
-  device_ids: ['1']  # GPU 1, 0.53 utilization
+  device_ids: ['1']  # GPU 1, 0.54 utilization
 
 rag_app:
   device_ids: ['0']  # GPU 0 (embeddings)
@@ -147,7 +147,7 @@ command: >
 # Reasoning server  
 command: >
   vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-  --gpu-memory-utilization 0.53  # Adjust this
+  --gpu-memory-utilization 0.54  # Adjust this
 ```
 
 ## 🎮 Using the Control Script
@@ -421,7 +421,7 @@ Create `.env` file:
 ```bash
 # GPU settings
 GPU_MEMORY_VISION=0.3
-GPU_MEMORY_REASONING=0.53
+GPU_MEMORY_REASONING=0.54
 
 # Model settings
 VISION_MODEL=Qwen/Qwen2.5-VL-3B-Instruct

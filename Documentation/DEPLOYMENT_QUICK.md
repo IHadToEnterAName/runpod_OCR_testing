@@ -8,7 +8,7 @@
 
 ### ✅ Your vLLM Configuration
 - **Vision Server**: Port 8006, 0.3 GPU utilization
-- **Reasoning Server**: Port 8005, 0.53 GPU utilization
+- **Reasoning Server**: Port 8005, 0.54 GPU utilization
 - **Models**: Your exact models (Qwen2.5-VL-3B, DeepSeek-R1-1.5B)
 
 ### ✅ Logic Preservation
@@ -56,7 +56,7 @@ source /workspace/venv/bin/activate
 VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
     --port 8006 \
     --gpu-memory-utilization 0.3 \
-    --max-model-len 8192 \
+    --max-model-len 4096 \
     --limit-mm-per-prompt '{"image":12}' \
     --enforce-eager \
     --trust-remote-code
@@ -67,7 +67,7 @@ VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
 source /workspace/venv/bin/activate
 VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
     --port 8005 \
-    --gpu-memory-utilization 0.53 \
+    --gpu-memory-utilization 0.54 \
     --max-model-len 16384 \
     --enforce-eager \
     --enable-prefix-caching
@@ -175,7 +175,7 @@ nvidia-smi
 
 # Adjust memory in vLLM commands:
 # --gpu-memory-utilization 0.3  (vision)
-# --gpu-memory-utilization 0.53 (reasoning)
+# --gpu-memory-utilization 0.54 (reasoning)
 ```
 
 ## 📊 What to Expect

@@ -17,7 +17,7 @@ Complete Docker image with:
 ### 2. **docker-compose.complete.yml**
 Orchestrates 5 services:
 - ✅ **vLLM Vision Server** (Port 8006, GPU 0, 0.3 memory)
-- ✅ **vLLM Reasoning Server** (Port 8005, GPU 1, 0.53 memory)
+- ✅ **vLLM Reasoning Server** (Port 8005, GPU 1, 0.54 memory)
 - ✅ **RAG Application** (Port 8000, Chainlit interface)
 - ✅ **ChromaDB** (Port 8003, vector database)
 - ✅ **Redis** (Port 6379, caching)
@@ -130,8 +130,8 @@ Edit `docker-compose.complete.yml`:
 # Vision server (currently 0.3)
 --gpu-memory-utilization 0.3
 
-# Reasoning server (currently 0.53)
---gpu-memory-utilization 0.53
+# Reasoning server (currently 0.54)
+--gpu-memory-utilization 0.54
 
 # Adjust based on your GPU VRAM
 ```
