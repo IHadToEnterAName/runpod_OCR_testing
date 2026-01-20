@@ -197,7 +197,7 @@ source /workspace/venv/bin/activate
 VLLM_USE_V1=0 vllm serve "Qwen/Qwen2.5-VL-3B-Instruct" \
     --port 8006 \
     --gpu-memory-utilization 0.3 \
-    --max-model-len 8192 \
+    --max-model-len 4096 \
     --limit-mm-per-prompt '{"image":12}' \
     --enforce-eager \
     --trust-remote-code
@@ -210,9 +210,9 @@ Handles deep document analysis and complex logic.
 
 ```bash
 source /workspace/venv/bin/activate
-VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
+VLLM_USE_V1=0 vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B" \
     --port 8005 \
-    --gpu-memory-utilization 0.53 \
+    --gpu-memory-utilization 0.54 \
     --max-model-len 16384 \
     --enforce-eager \
     --enable-prefix-caching
