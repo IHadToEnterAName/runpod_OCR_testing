@@ -112,8 +112,8 @@ services:
       - VISION_ENABLED=true
       - HF_HOME=/workspace/huggingface
     volumes:
-      - ./src/airflow/dags:/workspace/airflow/dags
-      - ./data:/workspace/data
+      - ../src/airflow/dags:/workspace/airflow/dags
+      - ../data:/workspace/data
       - airflow_logs:/workspace/airflow/logs
       - huggingface_cache:/workspace/huggingface
     ports:
@@ -163,8 +163,8 @@ services:
       - VISION_ENABLED=true
       - HF_HOME=/workspace/huggingface
     volumes:
-      - ./src/airflow/dags:/workspace/airflow/dags
-      - ./data:/workspace/data
+      - ../src/airflow/dags:/workspace/airflow/dags
+      - ../data:/workspace/data
       - airflow_logs:/workspace/airflow/logs
       - huggingface_cache:/workspace/huggingface
     command: airflow scheduler
@@ -217,8 +217,8 @@ services:
       - HF_HOME=/workspace/huggingface
       - CUDA_VISIBLE_DEVICES=0
     volumes:
-      - ./src:/workspace/src
-      - ./data:/workspace/data
+      - ../src:/workspace/src
+      - .../data:/workspace/data
       - huggingface_cache:/workspace/huggingface
       - chroma_data:/workspace/chroma_db
     ports:

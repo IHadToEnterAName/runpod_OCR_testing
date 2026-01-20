@@ -163,8 +163,8 @@ services:
     ports:
       - "${RAG_APP_PORT:-8000}:${RAG_APP_PORT:-8000}"
     volumes:
-      - ./src:/workspace/src
-      - ./data:/workspace/data
+      - ../src:/workspace/src
+      - ../data:/workspace/data
       - huggingface_cache:/workspace/huggingface
       - chroma_data:/workspace/chroma_db
     environment:
