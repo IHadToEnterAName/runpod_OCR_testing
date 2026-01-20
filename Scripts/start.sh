@@ -107,7 +107,7 @@ check_vllm() {
         print_success "Reasoning server (port 8005) is running"
     else
         print_warning "Reasoning server (port 8005) not responding"
-        print_info "Start with: python -m vllm.entrypoints.openai.api_server --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --port 8005 --device cuda:1"
+        print_info "Start with: python -m vllm.entrypoints.openai.api_server --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --port 8005 --device cuda:0"
     fi
     
     echo ""

@@ -86,7 +86,7 @@ RUN mkdir -p /workspace/src \
 ENV PYTHONPATH=/workspace/src
 ENV HF_HOME=/workspace/huggingface
 ENV TRANSFORMERS_CACHE=/workspace/huggingface
-ENV CUDA_VISIBLE_DEVICES=0,1
+ENV CUDA_VISIBLE_DEVICES=0
 
 # Copy application code
 COPY src/ /workspace/src/

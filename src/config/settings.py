@@ -97,7 +97,7 @@ class DatabaseConfig:
     
     # ChromaDB
     chroma_host: str = os.getenv("CHROMA_HOST", "localhost")
-    chroma_port: int = int(os.getenv("CHROMA_PORT", "8000"))
+    chroma_port: int = int(os.getenv("CHROMA_PORT", "8001"))
     chroma_persist_dir: str = "/workspace/chroma_db"
     
     # Redis
