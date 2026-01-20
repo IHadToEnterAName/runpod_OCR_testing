@@ -100,8 +100,8 @@ services:
       start_period: 120s
 
   # ===========================================================================
-  # vLLM REASONING SERVER (DeepSeek-R1-1.5B)
-  # Port 8005, GPU 1, 0.53 memory utilization
+  # vLLM REASONING SERVER (DeepSeek-R1-7B)
+  # Port 8005, GPU 0, 0.53 memory utilization
   # ===========================================================================
   vllm_reasoning:
     build:
@@ -118,10 +118,10 @@ services:
       - HF_HOME=/workspace/huggingface
       - VLLM_CACHE_ROOT=/workspace/vllm_cache
       - HF_HUB_ENABLE_HF_TRANSFER=1
-      - CUDA_VISIBLE_DEVICES=1
+      - CUDA_VISIBLE_DEVICES=0
       - VLLM_USE_V1=0
     command: >
-      vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+      vllm serve "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
       --port 8005
       --host 0.0.0.0
       --gpu-memory-utilization 0.53
@@ -136,7 +136,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['1']
+              device_ids: ['0']
               capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8005/v1/models"]
@@ -180,7 +180,7 @@ services:
       
       # Model configuration
       - VISION_MODEL=Qwen/Qwen2.5-VL-3B-Instruct
-      - REASONING_MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+      - REASONING_MODEL=deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
       - EMBEDDING_MODEL=nomic-ai/nomic-embed-text-v1.5
       
       # Paths
@@ -274,11 +274,9 @@ networks:
 # GPU ALLOCATION
 # =============================================================================
 #
-# RTX 5090 Dual GPU Setup:
-# - GPU 0 (device_ids: ['0']): Vision (0.3 util) + RAG App (embeddings)
-# - GPU 1 (device_ids: ['1']): Reasoning (0.53 util)
-#
-# Single GPU Setup:
-# Change all device_ids to ['0'] in the deploy sections above
+# Single GPU Setup (GPU 0):
+# - Vision Model: 0.3 GPU memory utilization
+# - Reasoning Model: 0.53 GPU memory utilization
+# - RAG App: embeddings
 #
 # =============================================================================

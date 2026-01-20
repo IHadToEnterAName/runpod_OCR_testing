@@ -23,7 +23,7 @@ class ModelConfig:
     
     # Reasoning Model (Port 8005)
     reasoning_base_url: str = os.getenv("REASONING_URL", "http://localhost:8005/v1")
-    reasoning_model: str = os.getenv("REASONING_MODEL", "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    reasoning_model: str = os.getenv("REASONING_MODEL", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
     
     # Embedding Model
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "nomic-ai/nomic-embed-text-v1.5")
