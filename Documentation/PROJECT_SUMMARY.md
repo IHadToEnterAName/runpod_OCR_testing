@@ -187,7 +187,7 @@ cp .env.example .env
 ./test_system.py
 
 # 5. Access
-open http://localhost:7860  # Chat interface
+open http://localhost:8000  # Chat interface
 ```
 
 ### First Query Workflow
@@ -195,7 +195,7 @@ open http://localhost:7860  # Chat interface
 1. Upload a PDF through Airflow (http://localhost:8080)
 2. Trigger the `document_ingestion_pipeline` DAG
 3. Wait ~60 seconds for processing
-4. Open chat (http://localhost:7860)
+4. Open chat (http://localhost:8000)
 5. Ask: "What is this document about?"
 6. Observe agent reasoning in logs
 7. Ask same question again → cache hit!

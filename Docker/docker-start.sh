@@ -112,7 +112,7 @@ wait_for_services() {
     
     # ChromaDB
     print_info "Waiting for ChromaDB..."
-    timeout 60 bash -c 'until curl -s http://localhost:8000/api/v1/heartbeat &> /dev/null; do sleep 2; done' || {
+    timeout 60 bash -c 'until curl -s http://localhost:8003/api/v1/heartbeat &> /dev/null; do sleep 2; done' || {
         print_error "ChromaDB failed to start"
         print_info "Check logs: docker compose logs chromadb"
         exit 1
@@ -158,9 +158,9 @@ wait_for_services() {
 # Show service info
 show_info() {
     print_header "Service URLs"
-    
+
     echo -e "${GREEN}RAG Application:${NC}      http://localhost:8000"
-    echo -e "${GREEN}ChromaDB:${NC}             http://localhost:8001"
+    echo -e "${GREEN}ChromaDB:${NC}             http://localhost:8003"
     echo -e "${GREEN}RedisInsight:${NC}         http://localhost:8002"
     echo -e "${GREEN}Vision API:${NC}           http://localhost:8006/v1/models"
     echo -e "${GREEN}Reasoning API:${NC}        http://localhost:8005/v1/models"

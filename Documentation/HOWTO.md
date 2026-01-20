@@ -58,10 +58,10 @@ docker compose logs -f rag_app
 
 Once all services are green:
 
-- **RAG Chat**: http://localhost:7860
+- **RAG Chat**: http://localhost:8000
 - **Airflow**: http://localhost:8080 (admin/admin)
 - **Redis UI**: http://localhost:8001
-- **ChromaDB**: http://localhost:8000
+- **ChromaDB**: http://localhost:8003
 
 ---
 
@@ -83,7 +83,7 @@ Once all services are green:
 
 ### Method 2: Quick Test (Development)
 
-Upload directly through Chainlit UI at http://localhost:7860
+Upload directly through Chainlit UI at http://localhost:8000
 
 ---
 
@@ -202,7 +202,7 @@ REASONING_GPU_MEMORY_UTILIZATION=0.7
 ### ChromaDB Connection Failed
 ```bash
 # Check health
-curl http://localhost:8000/api/v1/heartbeat
+curl http://localhost:8003/api/v1/heartbeat
 
 # Restart
 docker compose restart chromadb
@@ -308,7 +308,7 @@ docker stats
 # From Python
 docker exec -it rag_app python -c "
 import chromadb
-client = chromadb.HttpClient(host='chromadb', port=8000)
+client = chromadb.HttpClient(host='chromadb', port=8003)
 col = client.get_collection('documents')
 print(f'Total chunks: {col.count()}')
 "

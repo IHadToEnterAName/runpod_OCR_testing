@@ -129,10 +129,10 @@ docker compose ps
 
 ### 4. Access Services
 
-- **RAG Application**: http://localhost:7860
+- **RAG Application**: http://localhost:8000
 - **Airflow UI**: http://localhost:8080 (admin/admin)
 - **RedisInsight**: http://localhost:8001
-- **ChromaDB**: http://localhost:8000
+- **ChromaDB**: http://localhost:8003
 
 ## 📂 Project Structure
 
@@ -288,7 +288,7 @@ Use the `/stats` command in the chat or check RedisInsight at http://localhost:8
 ```python
 # Query ChromaDB directly
 import chromadb
-client = chromadb.HttpClient(host='localhost', port=8000)
+client = chromadb.HttpClient(host='localhost', port=8003)
 collection = client.get_collection('documents')
 print(f"Total chunks: {collection.count()}")
 ```
@@ -354,7 +354,7 @@ docker exec -it rag_app curl http://host.docker.internal:8005/v1/models
 docker compose restart chromadb
 
 # Check health
-curl http://localhost:8000/api/v1/heartbeat
+curl http://localhost:8003/api/v1/heartbeat
 ```
 
 ### Out of Memory

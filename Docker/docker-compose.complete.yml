@@ -37,7 +37,7 @@ services:
     image: chromadb/chroma:0.4.22
     container_name: rag_chromadb
     ports:
-      - "8001:8000"
+      - "8003:8000"
     volumes:
       - chroma_data:/chroma/chroma
     environment:
@@ -259,7 +259,7 @@ networks:
 #
 # 5. Access services:
 #    - RAG App: http://localhost:8000
-#    - ChromaDB: http://localhost:8001
+#    - ChromaDB: http://localhost:8003
 #    - RedisInsight: http://localhost:8002
 #    - Vision API: http://localhost:8006/v1/models
 #    - Reasoning API: http://localhost:8005/v1/models

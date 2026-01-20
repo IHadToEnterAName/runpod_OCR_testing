@@ -75,7 +75,7 @@ python -m vllm.entrypoints.openai.api_server \
 ### Access Services
 
 Open in browser:
-- **Chat Interface**: http://localhost:7860
+- **Chat Interface**: http://localhost:8000
 - **Airflow Dashboard**: http://localhost:8080 (admin/admin)
 - **Redis UI**: http://localhost:8001
 
@@ -94,7 +94,7 @@ cp your_document.pdf data/uploads/
 
 **Option B - Via Chat (Quick Test):**
 ```
-1. Go to http://localhost:7860
+1. Go to http://localhost:8000
 2. Drag & drop PDF file
 3. Wait for processing
 ```

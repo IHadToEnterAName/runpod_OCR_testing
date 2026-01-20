@@ -18,8 +18,8 @@ Complete Docker image with:
 Orchestrates 5 services:
 - ✅ **vLLM Vision Server** (Port 8006, GPU 0, 0.3 memory)
 - ✅ **vLLM Reasoning Server** (Port 8005, GPU 1, 0.53 memory)
-- ✅ **RAG Application** (Port 7860, Chainlit interface)
-- ✅ **ChromaDB** (Port 8000, vector database)
+- ✅ **RAG Application** (Port 8000, Chainlit interface)
+- ✅ **ChromaDB** (Port 8003, vector database)
 - ✅ **Redis** (Port 6379, caching)
 
 ### 3. **docker-start.sh**
@@ -58,7 +58,7 @@ chmod +x docker-start.sh
 
 # 3. Select: 1) First-time setup
 # Wait 15-20 minutes (build + model download)
-# Access: http://localhost:7860
+# Access: http://localhost:8000
 ```
 
 ### Option 2: Manual
@@ -72,7 +72,7 @@ docker compose -f docker-compose.complete.yml up -d
 # 3. Wait for initialization (5 minutes)
 # Watch logs: docker compose -f docker-compose.complete.yml logs -f
 
-# 4. Access: http://localhost:7860
+# 4. Access: http://localhost:8000
 ```
 
 ### Option 3: One-Line (Automated)
@@ -213,7 +213,7 @@ curl http://localhost:8006/v1/models
 curl http://localhost:8005/v1/models
 
 # ChromaDB
-curl http://localhost:8000/api/v1/heartbeat
+curl http://localhost:8003/api/v1/heartbeat
 ```
 
 ## 🐛 Troubleshooting
@@ -317,8 +317,8 @@ After deployment:
 - [ ] GPU visible: `nvidia-smi` inside containers
 - [ ] Vision API responds: `curl localhost:8006/v1/models`
 - [ ] Reasoning API responds: `curl localhost:8005/v1/models`
-- [ ] ChromaDB healthy: `curl localhost:8000/api/v1/heartbeat`
-- [ ] Web UI loads: `http://localhost:7860`
+- [ ] ChromaDB healthy: `curl localhost:8003/api/v1/heartbeat`
+- [ ] Web UI loads: `http://localhost:8000`
 - [ ] Can upload documents
 - [ ] Can ask questions
 - [ ] Responses generated
@@ -407,6 +407,6 @@ Your complete RAG system is now:
 ./docker-start.sh
 # Select: 1
 # Wait ~20 minutes
-# Open: http://localhost:7860
+# Open: http://localhost:8000
 # Done! 🚀
 ```

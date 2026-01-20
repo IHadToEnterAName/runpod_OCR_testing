@@ -45,7 +45,7 @@ This setup runs **everything in Docker containers**:
 # Wait for all services to start (~5 minutes)
 
 # 3. Access application
-open http://localhost:7860
+open http://localhost:8000
 
 # 4. Test APIs
 curl http://localhost:8005/v1/models  # Reasoning
@@ -235,10 +235,10 @@ Once running:
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| **RAG Application** | http://localhost:7860 | Chat interface |
+| **RAG Application** | http://localhost:8000 | Chat interface |
 | **Vision API** | http://localhost:8006/v1 | Image analysis |
 | **Reasoning API** | http://localhost:8005/v1 | Text generation |
-| **ChromaDB** | http://localhost:8000 | Vector database |
+| **ChromaDB** | http://localhost:8003 | Vector database |
 | **RedisInsight** | http://localhost:8001 | Cache UI |
 
 ### Test APIs
@@ -250,7 +250,7 @@ curl http://localhost:8006/v1/models
 curl http://localhost:8005/v1/models
 
 # Test ChromaDB
-curl http://localhost:8000/api/v1/heartbeat
+curl http://localhost:8003/api/v1/heartbeat
 ```
 
 ## 📊 Monitoring
@@ -483,8 +483,8 @@ After deployment, verify:
 - [ ] GPU visible in containers (`nvidia-smi` inside container)
 - [ ] Vision API responds (`curl localhost:8006/v1/models`)
 - [ ] Reasoning API responds (`curl localhost:8005/v1/models`)
-- [ ] ChromaDB healthy (`curl localhost:8000/api/v1/heartbeat`)
-- [ ] Web interface loads (`open http://localhost:7860`)
+- [ ] ChromaDB healthy (`curl localhost:8003/api/v1/heartbeat`)
+- [ ] Web interface loads (`open http://localhost:8000`)
 - [ ] Can upload documents
 - [ ] Can ask questions
 - [ ] Models generate responses

@@ -36,7 +36,7 @@ services:
     image: chromadb/chroma:0.4.22
     container_name: rag_chromadb
     ports:
-      - "8000:8000"
+      - "8003:8000"
     volumes:
       - chroma_data:/chroma/chroma
     environment:
@@ -98,7 +98,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
+      - CHROMA_PORT=8003
       
       # vLLM endpoints (using your exact ports)
       - VISION_URL=http://host.docker.internal:8006/v1
@@ -152,7 +152,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
+      - CHROMA_PORT=8003
       - VISION_URL=http://host.docker.internal:8006/v1
       - REASONING_URL=http://host.docker.internal:8005/v1
       
@@ -197,7 +197,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - CHROMA_HOST=chromadb
-      - CHROMA_PORT=8000
+      - CHROMA_PORT=8003
       
       # vLLM endpoints (your exact configuration)
       - VISION_URL=http://host.docker.internal:8006/v1
@@ -222,7 +222,7 @@ services:
       - huggingface_cache:/workspace/huggingface
       - chroma_data:/workspace/chroma_db
     ports:
-      - "7860:8000"
+      - "8000:8000"
     command: python -m chainlit run /workspace/src/app.py --host 0.0.0.0 --port 8000
     restart: unless-stopped
     networks:

@@ -7,7 +7,7 @@
 | Service | External Port | Internal Port | Purpose |
 |---------|--------------|---------------|---------|
 | **RAG Application** | **8000** | 8000 | Main chat interface (Chainlit) |
-| **ChromaDB** | **8001** | 8000 | Vector database API |
+| **ChromaDB** | **8003** | 8000 | Vector database API |
 | **RedisInsight** | **8002** | 8001 | Redis management UI |
 | **vLLM Reasoning** | **8005** | 8005 | Reasoning model API (DeepSeek-R1) |
 | **vLLM Vision** | **8006** | 8006 | Vision model API (Qwen2.5-VL) |
@@ -24,7 +24,7 @@ http://localhost:8000          # RAG Chat Interface
 # APIs
 http://localhost:8005/v1       # Reasoning API
 http://localhost:8006/v1       # Vision API
-http://localhost:8001          # ChromaDB API
+http://localhost:8003          # ChromaDB API
 
 # Management UIs
 http://localhost:8002          # RedisInsight
@@ -48,7 +48,7 @@ curl http://localhost:8006/v1/models
 # Should return model info JSON
 
 # ChromaDB
-curl http://localhost:8001/api/v1/heartbeat
+curl http://localhost:8003/api/v1/heartbeat
 # Should return heartbeat response
 
 # Redis
@@ -68,7 +68,7 @@ services:
   
   chromadb:
     ports:
-      - "8001:8000"  # Change left side: "NEW_PORT:8000"
+      - "8003:8000"  # Change left side: "NEW_PORT:8000"
   
   redis:
     ports:
@@ -114,7 +114,7 @@ netstat -ano | findstr :8000
 | Port | Common User | Solution |
 |------|-------------|----------|
 | 8000 | Django dev server | Change Django to 8080 or change RAG to 9000 |
-| 8001 | Other apps | Usually safe, or change to 8003 |
+| 8003 | Other apps | Usually safe, or change to different port |
 | 8005/8006 | Other vLLM | Stop other vLLM or use different ports |
 | 6379 | Existing Redis | Stop other Redis or change to 6380 |
 
@@ -162,7 +162,7 @@ sudo firewall-cmd --reload
 ### API Endpoints (Internal/Backend)
 - **8005** - Reasoning API
 - **8006** - Vision API
-- **8001** - ChromaDB API
+- **8003** - ChromaDB API
 
 ### Management (Admin Only)
 - **8002** - RedisInsight
@@ -179,7 +179,7 @@ Port 8000 (RAG App)
     ↓
 Internal Docker Network
     ↓
-Ports 8001, 8005, 8006 (APIs)
+Ports 8003, 8005, 8006 (APIs)
 ```
 
 ## 🌍 Remote Access Setup
@@ -287,7 +287,7 @@ After deployment:
 - [ ] RAG App responds: `curl http://localhost:8000`
 - [ ] Reasoning API responds: `curl http://localhost:8005/v1/models`
 - [ ] Vision API responds: `curl http://localhost:8006/v1/models`
-- [ ] ChromaDB responds: `curl http://localhost:8001/api/v1/heartbeat`
+- [ ] ChromaDB responds: `curl http://localhost:8003/api/v1/heartbeat`
 - [ ] Redis responds: `redis-cli -p 6379 ping`
 - [ ] Can access from browser: `http://localhost:8000`
 
@@ -298,7 +298,7 @@ After deployment:
 ```bash
 # Standard ports (after update)
 RAG App:     8000
-ChromaDB:    8001
+ChromaDB:    8003
 RedisUI:     8002
 Reasoning:   8005
 Vision:      8006

@@ -11,11 +11,11 @@ from typing import Dict, Any
 
 # Service endpoints
 SERVICES = {
-    "RAG App": "http://localhost:7860",
+    "RAG App": "http://localhost:8000",
     "Airflow": "http://localhost:8080/health",
     "Redis": "http://localhost:6379",
     "RedisInsight": "http://localhost:8001",
-    "ChromaDB": "http://localhost:8000/api/v1/heartbeat",
+    "ChromaDB": "http://localhost:8003/api/v1/heartbeat",
     "vLLM Vision": "http://localhost:8006/v1/models",
     "vLLM Reasoning": "http://localhost:8005/v1/models",
 }
@@ -43,7 +43,7 @@ def check_service(name: str, url: str, timeout: int = 5) -> bool:
 def test_chromadb_collection():
     """Test ChromaDB collection access."""
     try:
-        response = requests.get("http://localhost:8000/api/v1/collections")
+        response = requests.get("http://localhost:8003/api/v1/collections")
         if response.status_code == 200:
             collections = response.json()
             print(f"\n📊 ChromaDB Collections:")

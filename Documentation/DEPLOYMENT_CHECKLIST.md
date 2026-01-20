@@ -16,7 +16,7 @@
 - [ ] Git installed
 
 ### Network Requirements
-- [ ] Ports available: 6379, 7860, 8000, 8001, 8005, 8006, 8080
+- [ ] Ports available: 6379, 8000, 8001, 8002, 8003, 8005, 8006, 8080
 - [ ] Internet connection for model downloads (~20GB on first run)
 - [ ] Firewall rules configured (if applicable)
 
@@ -89,10 +89,10 @@ docker compose ps
 
 ### 4. Verify Services
 
-- [ ] RAG App: http://localhost:7860 (loads chat interface)
+- [ ] RAG App: http://localhost:8000 (loads chat interface)
 - [ ] Airflow: http://localhost:8080 (login: admin/admin)
 - [ ] RedisInsight: http://localhost:8001 (Redis UI)
-- [ ] ChromaDB: http://localhost:8000 (API responding)
+- [ ] ChromaDB: http://localhost:8003 (API responding)
 
 ### 5. Initialize Data
 
