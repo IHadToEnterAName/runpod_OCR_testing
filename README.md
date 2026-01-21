@@ -16,8 +16,8 @@ The application enables users to upload corporate documents and query them using
 
 ## Technical Stack
 
-* **Language Model:** Deepseek-R1-7B
-* **Vision Model:** Qwen 2.5VL
+* **Language Model:** Mistral
+* **Vision Model:** Llama vision
 * **Embedding Model:** Nomic-Embed-Text
 * **Orchestration:** Chainlit
 * **Processing:** NumPy, PyMuPDF, LangChain Text Splitters
