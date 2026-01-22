@@ -79,13 +79,38 @@ class PerformanceConfig:
 @dataclass
 class GenerationConfig:
     """LLM generation settings from original code."""
-    
+
     temperature: float = 0.3
     top_p: float = 0.85
-    
+
     # Thinking tag filtering
     filter_thinking_tags: bool = True
     thinking_timeout_seconds: int = 30
+
+# =============================================================================
+# ENHANCED OCR CONFIGURATION
+# =============================================================================
+
+@dataclass
+class OCRConfig:
+    """Configuration for enhanced OCR features."""
+
+    # Multi-Stage Verification
+    enable_verification: bool = True
+    confidence_threshold: float = 0.8  # Below this triggers self-correction
+    max_correction_attempts: int = 2
+
+    # Layout Awareness
+    enable_layout_awareness: bool = True
+    detect_tables: bool = True
+    detect_columns: bool = True
+    preserve_reading_order: bool = True
+
+    # Context Stitching
+    enable_context_stitching: bool = True
+    max_entities_per_page: int = 20
+    max_themes_per_page: int = 5
+    context_summary_max_length: int = 500
 
 # =============================================================================
 # DATABASE CONFIGURATION
@@ -143,21 +168,36 @@ CJK_RANGES = [
 @dataclass
 class Config:
     """Master configuration combining all settings."""
-    
-    models: ModelConfig = ModelConfig()
-    tokens: TokenConfig = TokenConfig()
-    chunking: ChunkingConfig = ChunkingConfig()
-    performance: PerformanceConfig = PerformanceConfig()
-    generation: GenerationConfig = GenerationConfig()
-    database: DatabaseConfig = DatabaseConfig()
-    
+
+    models: ModelConfig = None
+    tokens: TokenConfig = None
+    chunking: ChunkingConfig = None
+    performance: PerformanceConfig = None
+    generation: GenerationConfig = None
+    database: DatabaseConfig = None
+    ocr: OCRConfig = None
+
     # System prompt
     system_prompt: str = SYSTEM_PROMPT
-    
+
     # CJK filter
     cjk_ranges: list = None
-    
+
     def __post_init__(self):
+        if self.models is None:
+            self.models = ModelConfig()
+        if self.tokens is None:
+            self.tokens = TokenConfig()
+        if self.chunking is None:
+            self.chunking = ChunkingConfig()
+        if self.performance is None:
+            self.performance = PerformanceConfig()
+        if self.generation is None:
+            self.generation = GenerationConfig()
+        if self.database is None:
+            self.database = DatabaseConfig()
+        if self.ocr is None:
+            self.ocr = OCRConfig()
         if self.cjk_ranges is None:
             self.cjk_ranges = CJK_RANGES
 
