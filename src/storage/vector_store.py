@@ -1,7 +1,7 @@
 """
 Vector Store Module
 ===================
-ChromaDB operations with original logic preserved exactly.
+ChromaDB operations with reranking and Redis caching support.
 """
 
 import chromadb
@@ -10,6 +10,7 @@ import uuid
 import re
 from typing import List, Dict, Optional
 from config.settings import get_config
+from rag.reranker import rerank_chunks, rerank_with_hybrid_scoring
 
 # =============================================================================
 # CONFIGURATION
@@ -26,6 +27,24 @@ chroma_client = chromadb.PersistentClient(
 print(f"✅ ChromaDB at {config.database.chroma_persist_dir}")
 
 # =============================================================================
+# REDIS CACHE (Lazy initialization)
+# =============================================================================
+
+_cache = None
+
+def _get_cache():
+    """Get or initialize the Redis cache (lazy loading)."""
+    global _cache
+    if _cache is None:
+        try:
+            from rag.cache import get_cache
+            _cache = get_cache()
+        except Exception as e:
+            print(f"⚠️ Redis cache unavailable: {e}")
+            _cache = False  # Mark as unavailable
+    return _cache if _cache else None
+
+# =============================================================================
 # RETRIEVAL FUNCTION (Original Logic)
 # =============================================================================
 
@@ -34,32 +53,64 @@ def retrieve_chunks(
     query: str,
     query_embedding: List[float],
     top_k: int = None,
-    page_filter: Optional[int] = None
+    page_filter: Optional[int] = None,
+    enable_reranking: bool = True,
+    use_cache: bool = True
 ) -> List[Dict]:
     """
-    Retrieve chunks from ChromaDB.
-    Original logic from your code preserved exactly.
+    Retrieve chunks from ChromaDB with optional reranking and Redis caching.
+
+    Args:
+        collection: ChromaDB collection
+        query: User query string
+        query_embedding: Pre-computed query embedding
+        top_k: Number of results to return
+        page_filter: Optional page number to filter by
+        enable_reranking: If True, rerank results using cross-encoder
+        use_cache: If True, check/store results in Redis cache
+
+    Returns:
+        List of chunk dictionaries with text, page, type, and scores
     """
     if top_k is None:
         top_k = config.chunking.max_context_chunks
-    
+
+    collection_name = collection.name
+
+    # Check cache first (only for queries without page filter)
+    cache = _get_cache() if use_cache else None
+    if cache and not page_filter:
+        # Try exact match cache
+        cached_result = cache.get_query_result(query, collection_name)
+        if cached_result:
+            return cached_result[:top_k]
+
+        # Try semantic cache (similar query matching)
+        similar = cache.find_similar_query(query_embedding, collection_name)
+        if similar:
+            _, cached_chunks = similar
+            return cached_chunks[:top_k]
+
+    # For reranking, fetch more candidates initially
+    fetch_k = top_k * 2 if enable_reranking else top_k
+
     try:
         # Check collection size
         count = collection.count()
         print(f"📊 Collection has {count} chunks")
-        
+
         if count == 0:
             print("⚠️ Collection is empty!")
             return []
-        
+
         # Check for page filter in query
         page_match = re.search(r'page\s*(\d+)', query.lower())
         if page_match:
             page_filter = int(page_match.group(1))
             print(f"📄 Page filter detected: {page_filter}")
-        
+
         chunks = []
-        
+
         # If page filter, try page-specific retrieval first
         if page_filter:
             try:
@@ -67,35 +118,38 @@ def retrieve_chunks(
                     where={"page_number": page_filter},
                     include=["documents", "metadatas"]
                 )
-                
+
                 if page_results and page_results.get("documents"):
                     print(f"📄 Found {len(page_results['documents'])} chunks from page {page_filter}")
-                    
+
                     for doc, meta in zip(
-                        page_results["documents"], 
+                        page_results["documents"],
                         page_results["metadatas"]
                     ):
                         chunks.append({
                             "text": doc,
                             "page": meta.get("page_number"),
-                            "type": meta.get("chunk_type", "text")
+                            "type": meta.get("chunk_type", "text"),
+                            "distance": 0.0  # Page-specific results prioritized
                         })
-                    
-                    # If we have enough, return
+
+                    # If we have enough page-specific results, rerank and return
                     if len(chunks) >= top_k // 2:
+                        if enable_reranking:
+                            chunks = rerank_chunks(query, chunks, top_k=top_k)
                         return chunks[:top_k]
-                        
+
             except Exception as e:
                 print(f"⚠️ Page filter failed: {e}")
-        
-        # Semantic search (original logic)
+
+        # Semantic search
         try:
             results = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=top_k,
+                n_results=fetch_k,  # Fetch more for reranking
                 include=["documents", "metadatas", "distances"]
             )
-            
+
             if results and results.get("documents") and results["documents"][0]:
                 for doc, meta, dist in zip(
                     results["documents"][0],
@@ -108,25 +162,67 @@ def retrieve_chunks(
                             "text": doc,
                             "page": meta.get("page_number"),
                             "type": meta.get("chunk_type", "text"),
-                            "distance": dist
+                            "distance": dist,
+                            "layout_type": meta.get("layout_type"),
+                            "themes": meta.get("themes"),
+                            "key_entities": meta.get("key_entities")
                         })
-                
-                print(f"✅ Retrieved {len(chunks)} total chunks")
+
+                print(f"✅ Retrieved {len(chunks)} candidates for reranking")
             else:
                 print("⚠️ No results from semantic search")
-                
+
         except Exception as e:
             print(f"❌ Semantic search error: {e}")
             import traceback
             traceback.print_exc()
-        
-        return chunks[:top_k]
-        
+
+        # Apply reranking if enabled and we have results
+        if enable_reranking and chunks:
+            print(f"🔄 Reranking {len(chunks)} chunks...")
+            chunks = rerank_with_hybrid_scoring(
+                query=query,
+                chunks=chunks,
+                top_k=top_k,
+                embedding_weight=0.3,
+                rerank_weight=0.7
+            )
+            print(f"✅ Reranked to top {len(chunks)} chunks")
+
+        final_chunks = chunks[:top_k]
+
+        # Cache the result (only for queries without page filter)
+        if cache and not page_filter and final_chunks:
+            cache.set_query_result(query, collection_name, final_chunks)
+
+        return final_chunks
+
     except Exception as e:
         print(f"❌ Retrieval error: {e}")
         import traceback
         traceback.print_exc()
         return []
+
+
+def retrieve_chunks_simple(
+    collection: chromadb.Collection,
+    query: str,
+    query_embedding: List[float],
+    top_k: int = None,
+    page_filter: Optional[int] = None
+) -> List[Dict]:
+    """
+    Retrieve chunks without reranking (original logic preserved).
+    Use this for comparison or when speed is critical.
+    """
+    return retrieve_chunks(
+        collection=collection,
+        query=query,
+        query_embedding=query_embedding,
+        top_k=top_k,
+        page_filter=page_filter,
+        enable_reranking=False
+    )
 
 # =============================================================================
 # COLLECTION MANAGEMENT
@@ -140,10 +236,15 @@ def create_collection(name: str) -> chromadb.Collection:
     )
 
 def delete_collection(name: str):
-    """Delete collection."""
+    """Delete collection and clear associated Redis cache."""
     try:
         chroma_client.delete_collection(name)
         print(f"🗑️ Deleted collection: {name}")
+
+        # Clear Redis cache for this collection
+        cache = _get_cache()
+        if cache:
+            cache.clear_collection_cache(name)
     except:
         pass
 

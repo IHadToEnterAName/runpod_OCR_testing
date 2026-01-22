@@ -27,6 +27,7 @@ from processing.document_extractor import (
 from processing.vision import analyze_image
 from rag.embeddings import embed_documents
 from storage.vector_store import add_chunks_to_collection
+from rag.semantic_chunker import get_hybrid_chunker, smart_split_text
 
 # =============================================================================
 # CONFIGURATION
@@ -34,7 +35,11 @@ from storage.vector_store import add_chunks_to_collection
 
 config = get_config()
 
-# Text splitter (original logic)
+# Hybrid chunker (semantic + character fallback)
+# Uses semantic chunking for long texts, character-based for short texts
+hybrid_chunker = get_hybrid_chunker()
+
+# Legacy character-based splitter (for fallback or comparison)
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=config.chunking.chunk_size,
     chunk_overlap=config.chunking.chunk_overlap,
@@ -246,12 +251,14 @@ async def process_files(
     collection,
     file_list: List[dict],
     enable_context_stitching: bool = True,
-    enable_layout_awareness: bool = True
+    enable_layout_awareness: bool = True,
+    enable_semantic_chunking: bool = True
 ):
     """
     Process uploaded files into ChromaDB with enhanced features.
 
     Features:
+    - Semantic Chunking: Intelligent chunking based on semantic boundaries
     - Recursive Context Stitching: Bridges context between pages
     - Structural Layout Awareness: Preserves document structure
     - Multi-Stage OCR Verification: For images
@@ -262,6 +269,7 @@ async def process_files(
         file_list: List to track processed files
         enable_context_stitching: If True, extract and bridge page contexts
         enable_layout_awareness: If True, use layout-aware extraction
+        enable_semantic_chunking: If True, use semantic-aware chunking (default)
     """
 
     progress = cl.Message(content="📂 Starting processing...")
@@ -328,8 +336,11 @@ async def process_files(
                         except Exception as e:
                             print(f"⚠️ Context extraction skipped for p{page_num}: {e}")
 
-                    # Chunk the enriched text
-                    chunks = text_splitter.split_text(enriched_text)
+                    # Chunk the enriched text (semantic or character-based)
+                    if enable_semantic_chunking:
+                        chunks = hybrid_chunker.split_text(enriched_text, prefer_semantic=True)
+                    else:
+                        chunks = text_splitter.split_text(enriched_text)
 
                     for idx, chunk in enumerate(chunks):
                         all_docs.append(chunk)
@@ -390,7 +401,12 @@ async def process_files(
                         except Exception as e:
                             print(f"⚠️ Context extraction skipped for p{page_num}: {e}")
 
-                    chunks = text_splitter.split_text(enriched_text)
+                    # Chunk the enriched text (semantic or character-based)
+                    if enable_semantic_chunking:
+                        chunks = hybrid_chunker.split_text(enriched_text, prefer_semantic=True)
+                    else:
+                        chunks = text_splitter.split_text(enriched_text)
+
                     for idx, chunk in enumerate(chunks):
                         all_docs.append(chunk)
                         all_metas.append({
@@ -461,13 +477,17 @@ async def process_files(
                     total_chunks += 1
                     await asyncio.sleep(0.2)
         
-        # DOCX PROCESSING (original logic)
+        # DOCX PROCESSING
         elif fname.lower().endswith('.docx'):
             loop = asyncio.get_event_loop()
             text = await loop.run_in_executor(executor, extract_docx, fpath)
-            
+
             if text:
-                chunks = text_splitter.split_text(text)
+                # Use semantic or character-based chunking
+                if enable_semantic_chunking:
+                    chunks = hybrid_chunker.split_text(text, prefer_semantic=True)
+                else:
+                    chunks = text_splitter.split_text(text)
                 embeddings = embed_documents(chunks)
                 
                 docs = []
@@ -492,12 +512,16 @@ async def process_files(
                 
                 total_chunks += len(chunks)
         
-        # TXT PROCESSING (original logic)
+        # TXT PROCESSING
         elif fname.lower().endswith('.txt'):
             text = extract_txt(fpath)
-            
+
             if text:
-                chunks = text_splitter.split_text(text)
+                # Use semantic or character-based chunking
+                if enable_semantic_chunking:
+                    chunks = hybrid_chunker.split_text(text, prefer_semantic=True)
+                else:
+                    chunks = text_splitter.split_text(text)
                 embeddings = embed_documents(chunks)
                 
                 docs = []
@@ -593,8 +617,10 @@ async def process_files(
     ]
 
     # Add enhanced features info
-    if enable_layout_awareness or enable_context_stitching:
+    if enable_layout_awareness or enable_context_stitching or enable_semantic_chunking:
         summary_parts.append("🔬 **Enhanced Processing:**")
+        if enable_semantic_chunking:
+            summary_parts.append(f"• Semantic chunking: **Enabled**")
         if enable_layout_awareness and layout_aware_count > 0:
             summary_parts.append(f"• Layout-aware chunks: **{layout_aware_count}**")
             if table_pages > 0:
