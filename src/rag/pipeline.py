@@ -3,10 +3,10 @@ RAG Pipeline Module
 ===================
 Core RAG logic with intelligent routing, generation and streaming.
 Includes query routing for optimized retrieval and generation.
+Integrated with traffic controller for load management.
 """
 
 import asyncio
-from openai import AsyncOpenAI
 from typing import List, Dict, Optional
 import chainlit as cl
 
@@ -28,21 +28,18 @@ from rag.router import (
     GenerationStrategy
 )
 from rag.retrieval_strategies import execute_retrieval, RetrievalResult
+from rag.traffic_controller import (
+    get_traffic_controller,
+    TrafficController,
+    ModelType,
+    RequestPriority
+)
 
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
 
 config = get_config()
-
-# Initialize reasoning client (original logic)
-reasoning_client = AsyncOpenAI(
-    base_url=config.models.reasoning_base_url,
-    api_key="EMPTY"
-)
-
-# Semaphore for concurrency (original logic)
-llm_semaphore = asyncio.Semaphore(config.performance.llm_concurrent_limit)
 
 # Query router instance
 _router = None
@@ -176,7 +173,31 @@ Answer the user's question using ONLY the above content."""
 
         print(f"{'='*60}\n")
 
-        async with llm_semaphore:
+        # Get traffic controller for managed request execution
+        traffic_controller = get_traffic_controller()
+
+        # Run periodic health check in background
+        asyncio.create_task(traffic_controller.periodic_health_check())
+
+        # Check if reasoning model is healthy
+        if not traffic_controller.is_healthy(ModelType.REASONING):
+            print("⚠️ Reasoning model circuit breaker open, waiting for recovery...")
+            await traffic_controller.check_health(ModelType.REASONING)
+
+        # Get client from traffic controller (managed connection)
+        reasoning_client = traffic_controller.get_reasoning_client()
+
+        # Acquire semaphore through traffic controller's concurrency control
+        semaphore = traffic_controller._semaphores[ModelType.REASONING]
+
+        # Wait for rate limit
+        await traffic_controller.wait_for_rate_limit(ModelType.REASONING)
+
+        async with semaphore:
+            # Track request stats
+            traffic_controller._stats.total_requests += 1
+            traffic_controller._stats.reasoning_requests += 1
+
             stream = await reasoning_client.chat.completions.create(
                 model=config.models.reasoning_model,
                 messages=messages,
@@ -227,6 +248,9 @@ Answer the user's question using ONLY the above content."""
                 full_response += clean
                 await msg.stream_token(clean)
 
+            # Update circuit breaker on success
+            traffic_controller._update_circuit_breaker(ModelType.REASONING, error=False)
+
         full_response = clean_thinking(full_response)
         await msg.update()
 
@@ -240,6 +264,15 @@ Answer the user's question using ONLY the above content."""
         print(f"❌ Generation error: {e}")
         import traceback
         traceback.print_exc()
+
+        # Update circuit breaker on error
+        try:
+            traffic_controller = get_traffic_controller()
+            traffic_controller._update_circuit_breaker(ModelType.REASONING, error=True)
+            traffic_controller._stats.errors += 1
+        except:
+            pass
+
         return f"Error: {e}"
 
 

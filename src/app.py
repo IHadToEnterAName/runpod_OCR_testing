@@ -13,6 +13,7 @@ from rag.embeddings import embed_query
 from rag.pipeline import generate_response
 from storage.vector_store import create_collection, delete_collection, chroma_client, retrieve_chunks
 from processing.file_processor import process_files
+from rag.traffic_controller import get_traffic_controller, check_servers_health
 
 # =============================================================================
 # CONFIGURATION
@@ -160,6 +161,49 @@ async def on_message(message: cl.Message):
                 await cl.Message(content="📭 Collection empty").send()
         else:
             await cl.Message(content="❌ No collection").send()
+        return
+
+    if query.lower() == '/traffic':
+        # Get traffic controller stats
+        controller = get_traffic_controller()
+        stats = controller.get_stats()
+        health_summary = controller.get_health_summary()
+
+        result = f"""📊 **Traffic Controller Stats:**
+
+**Requests:**
+• Total: {stats['total_requests']}
+• Vision: {stats['vision_requests']}
+• Reasoning: {stats['reasoning_requests']}
+
+**Performance:**
+• Avg Response Time: {stats['avg_response_time_ms']:.0f}ms
+• Cache Hits: {stats['cache_hits']}
+• Rate Limited: {stats['rate_limited']}
+• Circuit Breaks: {stats['circuit_breaks']}
+• Errors: {stats['errors']}
+
+**Health Status:**
+• Vision: {stats['health']['vision']} {'🔴 OPEN' if stats['circuit_breakers']['vision_open'] else '🟢 CLOSED'}
+• Reasoning: {stats['health']['reasoning']} {'🔴 OPEN' if stats['circuit_breakers']['reasoning_open'] else '🟢 CLOSED'}
+
+{health_summary}"""
+        await cl.Message(content=result).send()
+        return
+
+    if query.lower() == '/health':
+        # Run health check
+        await cl.Message(content="🔍 Checking server health...").send()
+        stats = await check_servers_health()
+        controller = get_traffic_controller()
+
+        result = f"""✅ **Health Check Complete:**
+
+• Vision Model: {stats['health']['vision']}
+• Reasoning Model: {stats['health']['reasoning']}
+
+{controller.get_health_summary()}"""
+        await cl.Message(content=result).send()
         return
     
     # FILE UPLOAD (original logic)

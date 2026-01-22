@@ -215,6 +215,34 @@ class RoutingConfig:
     default_context_tokens: int = 5000
 
 # =============================================================================
+# TRAFFIC CONTROLLER CONFIGURATION
+# =============================================================================
+
+@dataclass
+class TrafficConfig:
+    """Traffic controller configuration."""
+
+    # Enable/disable traffic control
+    enabled: bool = True
+
+    # Rate limiting (requests per minute)
+    vision_rpm: int = 30       # Vision model (slower processing)
+    reasoning_rpm: int = 60    # Reasoning model
+
+    # Circuit breaker settings
+    vision_failure_threshold: int = 3      # Failures before circuit opens
+    reasoning_failure_threshold: int = 5
+    vision_recovery_timeout: float = 30.0  # Seconds before retry
+    reasoning_recovery_timeout: float = 20.0
+
+    # Health check interval (seconds)
+    health_check_interval: float = 30.0
+
+    # Request timeouts (seconds)
+    vision_timeout: float = 60.0
+    reasoning_timeout: float = 120.0
+
+# =============================================================================
 # SYSTEM PROMPT (Original Logic)
 # =============================================================================
 
@@ -264,6 +292,7 @@ class Config:
     reranker: RerankerConfig = None
     cache: CacheConfig = None
     routing: RoutingConfig = None
+    traffic: TrafficConfig = None
 
     # System prompt
     system_prompt: str = SYSTEM_PROMPT
@@ -292,6 +321,8 @@ class Config:
             self.cache = CacheConfig()
         if self.routing is None:
             self.routing = RoutingConfig()
+        if self.traffic is None:
+            self.traffic = TrafficConfig()
         if self.cjk_ranges is None:
             self.cjk_ranges = CJK_RANGES
 
