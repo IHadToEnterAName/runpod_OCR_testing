@@ -9,7 +9,6 @@ import re
 from enum import Enum
 from typing import List, Dict, Optional, Tuple, Any
 from dataclasses import dataclass
-import numpy as np
 
 from config.settings import get_config
 
@@ -275,7 +274,7 @@ class QueryRouter:
             Tuple of (strategy, parameters)
         """
         params = {
-            "top_k": config.chunking.max_context_chunks,
+            "top_k": config.visual_rag.search_top_k,
             "use_reranking": True,
             "page_filter": None,
         }
@@ -360,7 +359,7 @@ class QueryRouter:
         """
         base_params = {
             "temperature": config.generation.temperature,
-            "max_tokens": config.tokens.max_output_tokens,
+            "max_tokens": config.generation.max_output_tokens,
             "system_prompt_modifier": "",
         }
 
@@ -494,46 +493,6 @@ def route_query(query: str) -> RoutingDecision:
     """Convenience function to route a query."""
     router = get_router()
     return router.route(query)
-
-
-# =============================================================================
-# ROUTING-AWARE RETRIEVAL
-# =============================================================================
-
-def retrieve_with_routing(
-    collection,
-    query: str,
-    query_embedding: List[float],
-    routing_decision: Optional[RoutingDecision] = None
-) -> List[Dict]:
-    """
-    Retrieve chunks using routing-optimized parameters.
-
-    Args:
-        collection: ChromaDB collection
-        query: User query
-        query_embedding: Pre-computed query embedding
-        routing_decision: Optional pre-computed routing decision
-
-    Returns:
-        List of retrieved chunks
-    """
-    from storage.vector_store import retrieve_chunks
-
-    if routing_decision is None:
-        routing_decision = route_query(query)
-
-    # Use routing-determined parameters
-    chunks = retrieve_chunks(
-        collection=collection,
-        query=query,
-        query_embedding=query_embedding,
-        top_k=routing_decision.top_k,
-        page_filter=routing_decision.page_filter,
-        enable_reranking=routing_decision.use_reranking,
-    )
-
-    return chunks
 
 
 # =============================================================================

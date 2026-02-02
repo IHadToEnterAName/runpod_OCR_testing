@@ -1,7 +1,8 @@
 """
 Main Application
 ================
-Chainlit interface with all original logic preserved EXACTLY.
+Chainlit interface for Visual RAG Document Assistant.
+Byaldi (ColQwen2) + Qwen3-VL-32B-AWQ architecture.
 """
 
 import chainlit as cl
@@ -9,11 +10,10 @@ import uuid
 
 from config.settings import get_config
 from rag.memory import ConversationMemory
-from rag.embeddings import embed_query
 from rag.pipeline import generate_response
-from storage.vector_store import create_collection, delete_collection, chroma_client, retrieve_chunks
+from storage.visual_store import get_visual_store
 from processing.file_processor import process_files
-from rag.traffic_controller import get_traffic_controller, check_servers_health
+from rag.cache import get_cache
 
 # =============================================================================
 # CONFIGURATION
@@ -22,239 +22,186 @@ from rag.traffic_controller import get_traffic_controller, check_servers_health
 config = get_config()
 
 # =============================================================================
-# CHAINLIT HANDLERS (Original Logic Preserved)
+# CHAINLIT HANDLERS
 # =============================================================================
 
 @cl.on_chat_start
 async def start():
-    """
-    Initialize session with ChromaDB collection.
-    Original logic from your code preserved EXACTLY.
-    """
-    
-    # Create unique collection for this session (original logic)
+    """Initialize session with Byaldi index."""
+
+    # Create unique index name for this session
     session_id = str(uuid.uuid4())[:8]
-    collection_name = f"docs_{session_id}"
-    
-    # Create collection
-    collection = create_collection(collection_name)
-    
-    # Store in session (original logic)
-    cl.user_session.set("collection", collection)
-    cl.user_session.set("collection_name", collection_name)
+    index_name = f"docs_{session_id}"
+
+    # Store in session
+    cl.user_session.set("index_name", index_name)
     cl.user_session.set("files", [])
     cl.user_session.set("memory", ConversationMemory())
     cl.user_session.set("cancelled", False)
-    
-    print(f"📚 Created collection: {collection_name}")
-    
-    # Ask for files (original logic)
+    cl.user_session.set("has_documents", False)
+
+    print(f"Session started: {index_name}")
+
+    # Ask for files
     files = await cl.AskFileMessage(
-        content=f"🚀 **Document Assistant**\n\n"
-                f"**Models:**\n"
-                f"• Vision: {config.models.vision_model}\n"
-                f"• Reasoning: {config.models.reasoning_model}\n\n"
+        content=f"**Visual Document Assistant**\n\n"
+                f"**Model:** {config.models.model_name}\n"
+                f"**Retrieval:** Byaldi (ColQwen2)\n\n"
                 f"**Features:**\n"
-                f"• ✅ PDF, DOCX, TXT, Images\n"
-                f"• ✅ Page-aware retrieval\n"
-                f"• ✅ Vision analysis\n"
-                f"• ✅ Context-aware responses\n\n"
+                f"- PDF, Images (PNG, JPG)\n"
+                f"- Visual page search\n"
+                f"- Grounded answers with bounding boxes\n"
+                f"- Page-aware retrieval\n\n"
                 f"Upload files to start!",
         accept=[
             "application/pdf",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "text/plain",
             "image/png",
-            "image/jpeg"
+            "image/jpeg",
+            "image/webp"
         ],
         max_size_mb=50,
         timeout=300
     ).send()
-    
+
     if files:
         file_list = cl.user_session.get("files")
-        await process_files(files, collection, file_list)
+        await process_files(files, index_name, file_list, is_first_upload=True)
+        cl.user_session.set("has_documents", True)
 
 
 @cl.on_stop
 async def on_stop():
-    """
-    Handle stop button.
-    Original logic preserved.
-    """
+    """Handle stop button."""
     cl.user_session.set("cancelled", True)
-    print("🛑 Stop requested")
+    print("Stop requested")
 
 
 @cl.on_message
 async def on_message(message: cl.Message):
-    """
-    Handle messages.
-    Original logic from your code preserved EXACTLY.
-    """
-    
+    """Handle messages and commands."""
+
     query = message.content.strip()
-    collection = cl.user_session.get("collection")
+    index_name = cl.user_session.get("index_name")
     file_list = cl.user_session.get("files")
     memory = cl.user_session.get("memory")
-    
-    # COMMANDS (original logic)
-    
+    has_documents = cl.user_session.get("has_documents", False)
+
+    # === COMMANDS ===
+
     if query.lower() == '/clear':
-        coll_name = cl.user_session.get("collection_name")
-        delete_collection(coll_name)
-        
-        # Create new collection
+        # Delete index and create fresh one
+        store = get_visual_store()
+        store.delete_index(index_name)
+
+        cache = get_cache()
+        cache.clear_index_cache(index_name)
+
         new_name = f"docs_{str(uuid.uuid4())[:8]}"
-        new_coll = create_collection(new_name)
-        
-        cl.user_session.set("collection", new_coll)
-        cl.user_session.set("collection_name", new_name)
+        cl.user_session.set("index_name", new_name)
         cl.user_session.set("files", [])
+        cl.user_session.set("has_documents", False)
         memory.clear()
-        
-        await cl.Message(content="🗑️ Cleared. Ready for new files.").send()
+
+        await cl.Message(content="Cleared. Ready for new files.").send()
         return
-    
+
     if query.lower() == '/files':
         if file_list:
-            names = "\n".join([f"• {f['name']}" for f in file_list])
-            await cl.Message(content=f"📁 **Files:**\n{names}").send()
+            names = "\n".join([f"- {f['name']} ({f.get('pages', '?')} pages)" for f in file_list])
+            await cl.Message(content=f"**Files:**\n{names}").send()
         else:
-            await cl.Message(content="📭 No files.").send()
+            await cl.Message(content="No files uploaded.").send()
         return
-    
+
     if query.lower() == '/stats':
-        count = collection.count() if collection else 0
+        store = get_visual_store()
+        stats = store.get_stats(index_name)
+        cache = get_cache()
+        cache_stats = cache.get_stats()
+
         await cl.Message(
-            content=f"📊 **Stats:**\n• Chunks: {count}\n• Files: {len(file_list)}"
+            content=f"**Stats:**\n"
+                    f"- Pages indexed: {stats['total_pages']}\n"
+                    f"- Documents: {stats['document_count']}\n"
+                    f"- Cache: {cache_stats.get('used_memory', 'N/A')}\n"
+                    f"- Files: {len(file_list)}"
         ).send()
         return
-    
-    if query.lower() == '/test':
-        # Test retrieval (original logic)
-        if collection and collection.count() > 0:
-            query_emb = embed_query("summary overview")
-            test_chunks = retrieve_chunks(collection, "summary overview", query_emb, top_k=3)
-            
-            if test_chunks:
-                result = "✅ **Retrieval Test Passed!**\n\n"
-                for i, c in enumerate(test_chunks):
-                    result += f"**[{i+1}] Page {c.get('page', '?')}:**\n{c['text'][:150]}...\n\n"
-                await cl.Message(content=result).send()
-            else:
-                await cl.Message(content="❌ Retrieval returned empty").send()
-        else:
-            await cl.Message(content="📭 No documents to test").send()
-        return
-    
+
     if query.lower() == '/debug':
-        if collection:
-            count = collection.count()
-            if count > 0:
-                sample = collection.get(limit=3, include=["documents", "metadatas"])
-                result = f"📊 **Debug:**\n• Count: {count}\n\n**Samples:**\n"
-                for doc, meta in zip(sample["documents"], sample["metadatas"]):
-                    result += f"• Page {meta.get('page_number', '?')}: {doc[:100]}...\n"
-                await cl.Message(content=result).send()
-            else:
-                await cl.Message(content="📭 Collection empty").send()
-        else:
-            await cl.Message(content="❌ No collection").send()
-        return
+        store = get_visual_store()
+        stats = store.get_stats(index_name)
+        docs = stats.get("documents", [])
 
-    if query.lower() == '/traffic':
-        # Get traffic controller stats
-        controller = get_traffic_controller()
-        stats = controller.get_stats()
-        health_summary = controller.get_health_summary()
-
-        result = f"""📊 **Traffic Controller Stats:**
-
-**Requests:**
-• Total: {stats['total_requests']}
-• Vision: {stats['vision_requests']}
-• Reasoning: {stats['reasoning_requests']}
-
-**Performance:**
-• Avg Response Time: {stats['avg_response_time_ms']:.0f}ms
-• Cache Hits: {stats['cache_hits']}
-• Rate Limited: {stats['rate_limited']}
-• Circuit Breaks: {stats['circuit_breaks']}
-• Errors: {stats['errors']}
-
-**Health Status:**
-• Vision: {stats['health']['vision']} {'🔴 OPEN' if stats['circuit_breakers']['vision_open'] else '🟢 CLOSED'}
-• Reasoning: {stats['health']['reasoning']} {'🔴 OPEN' if stats['circuit_breakers']['reasoning_open'] else '🟢 CLOSED'}
-
-{health_summary}"""
+        result = f"**Debug:**\n- Index: {index_name}\n- Pages: {stats['total_pages']}\n"
+        if docs:
+            result += "- Documents:\n"
+            for doc in docs:
+                result += f"  - {doc}\n"
         await cl.Message(content=result).send()
         return
 
     if query.lower() == '/health':
-        # Run health check
-        await cl.Message(content="🔍 Checking server health...").send()
-        stats = await check_servers_health()
-        controller = get_traffic_controller()
-
-        result = f"""✅ **Health Check Complete:**
-
-• Vision Model: {stats['health']['vision']}
-• Reasoning Model: {stats['health']['reasoning']}
-
-{controller.get_health_summary()}"""
-        await cl.Message(content=result).send()
-        return
-    
-    # FILE UPLOAD (original logic)
-    if message.elements:
-        if not collection:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(base_url=config.models.base_url, api_key="EMPTY")
+        try:
+            models = await client.models.list()
+            model_names = [m.id for m in models.data]
             await cl.Message(
-                content="❌ Session not initialized. Refresh page."
+                content=f"**Health Check:**\n- vLLM: Online\n- Models: {', '.join(model_names)}"
             ).send()
+        except Exception as e:
+            await cl.Message(content=f"**Health Check:**\n- vLLM: Offline ({e})").send()
+        return
+
+    # === FILE UPLOAD ===
+    if message.elements:
+        if not index_name:
+            await cl.Message(content="Session not initialized. Refresh page.").send()
             return
-        await process_files(message.elements, collection, file_list)
+
+        is_first = not has_documents
+        await process_files(message.elements, index_name, file_list, is_first_upload=is_first)
+        cl.user_session.set("has_documents", True)
         return
-    
-    # CHECK COLLECTION (original logic)
-    if not collection or collection.count() == 0:
-        await cl.Message(
-            content="📭 No documents loaded. Please upload files first."
-        ).send()
+
+    # === CHECK FOR DOCUMENTS ===
+    if not has_documents:
+        await cl.Message(content="No documents loaded. Please upload files first.").send()
         return
-    
-    # GENERATE RESPONSE (original logic)
+
+    # === GENERATE RESPONSE ===
     response_msg = cl.Message(content="")
     await response_msg.send()
-    
-    # Generate query embedding
-    query_embedding = embed_query(query)
-    
-    # Generate response
-    await generate_response(query, collection, query_embedding, memory, response_msg)
+
+    await generate_response(query, index_name, memory, response_msg)
 
 
 @cl.on_chat_end
 async def on_end():
-    """
-    Cleanup on session end.
-    Original logic preserved.
-    """
-    coll_name = cl.user_session.get("collection_name")
-    if coll_name:
-        delete_collection(coll_name)
+    """Cleanup on session end."""
+    index_name = cl.user_session.get("index_name")
+    if index_name:
+        store = get_visual_store()
+        store.delete_index(index_name)
+
+        cache = get_cache()
+        cache.clear_index_cache(index_name)
+
+        print(f"Session ended, cleaned up: {index_name}")
 
 
 # =============================================================================
-# MAIN (Original Logic)
+# MAIN
 # =============================================================================
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("🚀 DOCUMENT ASSISTANT - RAG SYSTEM")
-    print("="*60)
-    print("✅ Session-based ChromaDB collections")
-    print("✅ Proper query vs document embeddings")
-    print("✅ Verified context injection")
-    print("✅ Page-aware retrieval")
-    print("="*60 + "\n")
+    print("\n" + "=" * 60)
+    print("VISUAL DOCUMENT ASSISTANT")
+    print("=" * 60)
+    print(f"Model: {config.models.model_name}")
+    print(f"Retrieval: Byaldi ({config.byaldi.model_name})")
+    print(f"Search Top-K: {config.visual_rag.search_top_k}")
+    print(f"Rerank Top-K: {config.visual_rag.rerank_top_k}")
+    print(f"Grounding: {config.visual_rag.enable_grounding}")
+    print("=" * 60 + "\n")

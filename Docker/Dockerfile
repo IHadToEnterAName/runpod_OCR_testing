@@ -1,18 +1,17 @@
 # =============================================================================
-# Production RAG Application Dockerfile
-# Optimized for NVIDIA A100 (Ampere SM 8.0) on Azure
+# Visual RAG Application Dockerfile
+# Byaldi (ColQwen2) + Qwen3-VL via vLLM
+# NVIDIA runtime needed for ColQwen2 GPU inference
 # =============================================================================
 
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-LABEL maintainer="RAG Document Assistant"
-LABEL version="2.0"
-LABEL description="Production RAG application for A100 GPU"
+LABEL maintainer="Visual RAG Document Assistant"
+LABEL version="3.0"
+LABEL description="Visual RAG with Byaldi (ColQwen2) retrieval"
 
-# Prevent interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Set working directory
 WORKDIR /workspace
 
 # =============================================================================
@@ -46,31 +45,24 @@ RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
 # Python Dependencies - Layered for better caching
 # =============================================================================
 
-# Layer 1: PyTorch with CUDA 12.1 support (optimized for A100)
+# Layer 1: PyTorch with CUDA 12.1 (needed for ColQwen2 via Byaldi)
 RUN pip install --no-cache-dir \
     torch==2.3.1 \
     torchvision==0.18.1 \
-    torchaudio==2.3.1 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# Layer 2: ML/Transformers
+# Layer 2: Byaldi + ColPali engine (visual retrieval)
+RUN pip install --no-cache-dir \
+    byaldi>=0.0.5 \
+    colpali-engine>=0.3.0
+
+# Layer 3: ML/Tokenization
 RUN pip install --no-cache-dir \
     transformers>=4.40.0 \
-    sentence-transformers>=3.0.0 \
-    tiktoken>=0.7.0 \
-    einops
+    tiktoken>=0.7.0
 
-# Layer 3: LangChain stack
+# Layer 4: Cache
 RUN pip install --no-cache-dir \
-    langchain>=0.2.0 \
-    langchain-community>=0.2.0 \
-    langchain-core>=0.2.0 \
-    langchain-text-splitters>=0.2.0 \
-    langgraph>=0.2.0
-
-# Layer 4: Vector store and caching
-RUN pip install --no-cache-dir \
-    chromadb>=0.5.0 \
     redis>=5.0.0 \
     hiredis>=2.3.0
 
@@ -91,7 +83,6 @@ RUN pip install --no-cache-dir \
 # Layer 7: Utilities
 RUN pip install --no-cache-dir \
     "numpy>=1.26.0,<2.0.0" \
-    pandas>=2.2.0 \
     pydantic>=2.7.0 \
     python-dotenv>=1.0.0 \
     pyyaml>=6.0.0 \
@@ -106,10 +97,8 @@ RUN pip install --no-cache-dir \
 # Create directories
 RUN mkdir -p /workspace/src \
     /workspace/data/uploads \
-    /workspace/data/processed \
-    /workspace/data/failed \
+    /workspace/data/indexes \
     /workspace/huggingface \
-    /workspace/chroma_db \
     /workspace/logs
 
 # Environment variables
@@ -121,13 +110,11 @@ ENV TRANSFORMERS_CACHE=/workspace/huggingface
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 ENV CUDA_VISIBLE_DEVICES=0
 
-# Pre-download embedding and reranker models so container doesn't need internet on startup
+# Pre-download ColQwen2 model so container doesn't need internet on startup
 RUN python -c "\
-from sentence_transformers import SentenceTransformer; \
-SentenceTransformer('nomic-ai/nomic-embed-text-v1.5', trust_remote_code=True); \
-from sentence_transformers import CrossEncoder; \
-CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2'); \
-print('Models downloaded successfully')"
+from byaldi import RAGMultiModalModel; \
+model = RAGMultiModalModel.from_pretrained('vidore/colqwen2-v0.1'); \
+print('ColQwen2 model downloaded successfully')"
 
 # Copy application code
 COPY src/ /workspace/src/
@@ -136,8 +123,6 @@ COPY src/ /workspace/src/
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/ || exit 1
 
-# Expose port
 EXPOSE 8000
 
-# Default command
 CMD ["python", "-m", "chainlit", "run", "/workspace/src/app.py", "--host", "0.0.0.0", "--port", "8000"]

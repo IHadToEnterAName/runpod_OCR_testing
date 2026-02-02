@@ -1,12 +1,13 @@
 # =============================================================================
-# Production RAG Stack - Docker Compose
+# Visual RAG Stack - Docker Compose
 # =============================================================================
 #
-# IMPORTANT: vLLM servers run on HOST machine for direct GPU access
-# This compose file handles: Redis, ChromaDB, and RAG Application
+# Services: Redis (cache) + RAG Application (Chainlit + Byaldi)
+# vLLM (Qwen3-VL-32B-AWQ) runs on HOST for direct GPU access
+# ChromaDB removed - using Byaldi (ColQwen2) for visual retrieval
 #
 # Usage:
-#   1. Start vLLM servers on host (see scripts/start_vllm.sh)
+#   1. Start vLLM on host: ./start.sh
 #   2. Run: docker-compose up -d
 #   3. Access app at http://localhost:8080
 #
@@ -34,31 +35,7 @@ services:
       retries: 3
 
   # ===========================================================================
-  # CHROMADB - Vector Database (Optional - can use embedded mode)
-  # ===========================================================================
-  chromadb:
-    image: chromadb/chroma:0.5.0
-    container_name: rag_chromadb
-    ports:
-      - "${CHROMA_PORT:-8003}:8000"
-    volumes:
-      - chroma_data:/chroma/chroma
-    environment:
-      - IS_PERSISTENT=TRUE
-      - ANONYMIZED_TELEMETRY=FALSE
-      - CHROMA_SERVER_AUTHN_PROVIDER=
-    restart: unless-stopped
-    networks:
-      - rag_network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  # ===========================================================================
-  # RAG APPLICATION - Chainlit + LangGraph
+  # RAG APPLICATION - Chainlit + Byaldi (ColQwen2)
   # ===========================================================================
   rag_app:
     build:
@@ -68,36 +45,34 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      chromadb:
-        condition: service_healthy
     environment:
       # Service connections (Docker internal)
       - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=${REDIS_PORT:-6379}
-      - CHROMA_HOST=${CHROMA_HOST:-chromadb}
-      - CHROMA_PORT=8000
 
-      # vLLM endpoints (on HOST machine)
-      - VISION_URL=${VISION_URL:-http://host.docker.internal:8006/v1}
-      - REASONING_URL=${REASONING_URL:-http://host.docker.internal:8005/v1}
+      # vLLM endpoint (on HOST machine)
+      - VLLM_URL=${VLLM_URL:-http://host.docker.internal:8001/v1}
+      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3-VL-32B-Instruct-AWQ}
 
-      # Model configuration
-      - VISION_MODEL=${VISION_MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}
-      - REASONING_MODEL=${REASONING_MODEL:-deepseek-ai/DeepSeek-R1-Distill-Qwen-7B}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-ai/nomic-embed-text-v1.5}
-      - RERANKER_MODEL=${RERANKER_MODEL:-cross-encoder/ms-marco-MiniLM-L-6-v2}
+      # Byaldi model
+      - BYALDI_MODEL=${BYALDI_MODEL:-vidore/colqwen2-v0.1}
+      - BYALDI_INDEX_PATH=/workspace/data/indexes
+
+      # Visual RAG settings
+      - SEARCH_TOP_K=${SEARCH_TOP_K:-10}
+      - RERANK_TOP_K=${RERANK_TOP_K:-5}
+      - ENABLE_GROUNDING=${ENABLE_GROUNDING:-true}
+      - IMAGE_DPI=${IMAGE_DPI:-200}
 
       # Cache settings
       - CACHE_ENABLED=${CACHE_ENABLED:-true}
-      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-3600}
-      - CACHE_SIMILARITY_THRESHOLD=${CACHE_SIMILARITY_THRESHOLD:-0.95}
 
       # Routing settings
       - ROUTING_ENABLED=${ROUTING_ENABLED:-true}
 
       # Generation settings
       - TEMPERATURE=${TEMPERATURE:-0.3}
-      - MAX_TOKENS=${MAX_TOKENS:-2048}
+      - MAX_TOKENS=${MAX_TOKENS:-4096}
 
       # Python settings
       - PYTHONPATH=/workspace/src
@@ -106,21 +81,20 @@ services:
       - HF_HOME=/workspace/huggingface
       - TRANSFORMERS_CACHE=/workspace/huggingface
       - HF_HUB_ENABLE_HF_TRANSFER=1
-      - HF_HUB_OFFLINE=1
-      - TRANSFORMERS_OFFLINE=1
       - NVIDIA_VISIBLE_DEVICES=all
+
       # Logging
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
-      # Mount source for development (remove in production for faster startup)
+      # Mount source for development (remove in production)
       - ../src:/workspace/src:ro
-      # Persistent data
+      # Persistent data and indexes
       - ../data:/workspace/data
-      - app_chroma_db:/workspace/chroma_db
+      - byaldi_indexes:/workspace/data/indexes
+      - huggingface_cache:/workspace/huggingface
     ports:
       - "${RAG_APP_PORT:-8080}:8000"
     extra_hosts:
-      # Allow container to access host machine
       - "host.docker.internal:host-gateway"
     dns:
       - 8.8.8.8
@@ -137,9 +111,9 @@ services:
 volumes:
   redis_data:
     driver: local
-  chroma_data:
+  byaldi_indexes:
     driver: local
-  app_chroma_db:
+  huggingface_cache:
     driver: local
 
 # =============================================================================
