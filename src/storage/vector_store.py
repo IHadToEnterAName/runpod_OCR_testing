@@ -80,24 +80,31 @@ def retrieve_chunks(
     # Check cache first (only for queries without page filter)
     cache = _get_cache() if use_cache else None
     if cache and not page_filter:
-        # Try exact match cache
-        cached_result = cache.get_query_result(query, collection_name)
-        if cached_result:
-            return cached_result[:top_k]
+        try:
+            # Try exact match cache
+            cached_result = cache.get_query_result(query, collection_name)
+            if cached_result and len(cached_result) > 0:
+                print(f"📦 Cache hit: {len(cached_result)} chunks")
+                return cached_result[:top_k]
 
-        # Try semantic cache (similar query matching)
-        similar = cache.find_similar_query(query_embedding, collection_name)
-        if similar:
-            _, cached_chunks = similar
-            return cached_chunks[:top_k]
+            # Try semantic cache (similar query matching)
+            similar = cache.find_similar_query(query_embedding, collection_name)
+            if similar:
+                _, cached_chunks = similar
+                if cached_chunks and len(cached_chunks) > 0:
+                    print(f"📦 Semantic cache hit: {len(cached_chunks)} chunks")
+                    return cached_chunks[:top_k]
+        except Exception as e:
+            print(f"⚠️ Cache lookup failed, falling through to ChromaDB: {e}")
 
     # For reranking, fetch more candidates initially
     fetch_k = top_k * 2 if enable_reranking else top_k
+    print(f"🔍 Retrieval: query='{query[:50]}...', top_k={top_k}, fetch_k={fetch_k}, reranking={enable_reranking}")
 
     try:
         # Check collection size
         count = collection.count()
-        print(f"📊 Collection has {count} chunks")
+        print(f"📊 Collection '{collection_name}' has {count} chunks")
 
         if count == 0:
             print("⚠️ Collection is empty!")
@@ -144,9 +151,11 @@ def retrieve_chunks(
 
         # Semantic search
         try:
+            # Cap fetch_k to collection size to avoid ChromaDB errors
+            safe_fetch_k = min(fetch_k, count)
             results = collection.query(
                 query_embeddings=[query_embedding],
-                n_results=fetch_k,  # Fetch more for reranking
+                n_results=max(safe_fetch_k, 1),  # At least 1
                 include=["documents", "metadatas", "distances"]
             )
 
@@ -191,9 +200,17 @@ def retrieve_chunks(
 
         final_chunks = chunks[:top_k]
 
+        if not final_chunks:
+            print(f"⚠️ Retrieval returned 0 chunks for query: '{query[:80]}'")
+        else:
+            print(f"✅ Returning {len(final_chunks)} final chunks")
+
         # Cache the result (only for queries without page filter)
         if cache and not page_filter and final_chunks:
-            cache.set_query_result(query, collection_name, final_chunks)
+            try:
+                cache.set_query_result(query, collection_name, final_chunks)
+            except Exception as e:
+                print(f"⚠️ Cache write failed: {e}")
 
         return final_chunks
 
@@ -257,23 +274,47 @@ def add_chunks_to_collection(
 ):
     """
     Add chunks to collection.
-    Original batch logic preserved.
+    Original batch logic preserved with stale collection handling.
     """
     batch_size = 50
-    
+
     for i in range(0, len(documents), batch_size):
         batch_end = min(i + batch_size, len(documents))
-        
+
         batch_docs = documents[i:batch_end]
         batch_embs = embeddings[i:batch_end]
         batch_metas = metadatas[i:batch_end]
         batch_ids = ids[i:batch_end]
-        
-        collection.add(
-            documents=batch_docs,
-            embeddings=batch_embs,
-            metadatas=batch_metas,
-            ids=batch_ids
-        )
-        
-        print(f"   Added {batch_end}/{len(documents)} chunks...")
+
+        try:
+            # Verify collection still exists before adding
+            _ = collection.count()
+
+            collection.add(
+                documents=batch_docs,
+                embeddings=batch_embs,
+                metadatas=batch_metas,
+                ids=batch_ids
+            )
+
+            print(f"   Added {batch_end}/{len(documents)} chunks...")
+
+        except Exception as e:
+            print(f"❌ Error adding batch {i}-{batch_end}: {e}")
+            # Try to re-get the collection by name
+            try:
+                collection_name = collection.name
+                print(f"   Attempting to re-get collection '{collection_name}'...")
+                collection = chroma_client.get_collection(collection_name)
+
+                # Retry the add operation
+                collection.add(
+                    documents=batch_docs,
+                    embeddings=batch_embs,
+                    metadatas=batch_metas,
+                    ids=batch_ids
+                )
+                print(f"   ✅ Retry successful: Added {batch_end}/{len(documents)} chunks")
+            except Exception as retry_error:
+                print(f"   ❌ Retry failed: {retry_error}")
+                raise

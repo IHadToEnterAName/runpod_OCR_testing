@@ -390,7 +390,7 @@ class QueryRouter:
             return GenerationStrategy.DIRECT_ANSWER, {
                 **base_params,
                 "temperature": 0.1,
-                "max_tokens": 500,
+                "max_tokens": 1500,  # Increased from 500
                 "system_prompt_modifier": "Provide a direct, factual answer. Be precise and cite the source page.",
             }
 
@@ -398,7 +398,7 @@ class QueryRouter:
             return GenerationStrategy.DIRECT_ANSWER, {
                 **base_params,
                 "temperature": 0.2,
-                "max_tokens": 400,
+                "max_tokens": 1000,  # Increased from 400
                 "system_prompt_modifier": "Provide a clear, concise definition based on the document content.",
             }
 

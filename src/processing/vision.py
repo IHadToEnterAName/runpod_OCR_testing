@@ -14,7 +14,7 @@ from openai import AsyncOpenAI
 from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 from config.settings import get_config
-from utils.helpers import filter_cjk
+from utils.helpers import filter_cjk, clean_thinking
 
 # =============================================================================
 # CONFIGURATION
@@ -55,18 +55,19 @@ class OCRResult:
 # IMAGE PROCESSING (Original Logic)
 # =============================================================================
 
-def resize_image(image: Image.Image, max_size: int = 384) -> Image.Image:
+def resize_image(image: Image.Image, max_size: int = 2048) -> Image.Image:
     """
     Resize image to max dimension.
-    Original logic from your code preserved exactly.
+    8B model needs higher resolution (2048px) for dense text/tables.
+    This is the sweet spot for Qwen 2.5-VL's dynamic resolution.
     """
     w, h = image.size
     if w <= max_size and h <= max_size:
         return image
-    
+
     ratio = min(max_size / w, max_size / h)
     new_size = (int(w * ratio), int(h * ratio))
-    
+
     return image.resize(new_size, Image.Resampling.LANCZOS)
 
 def image_to_base64(image: Image.Image) -> str:
@@ -89,18 +90,34 @@ def image_to_base64(image: Image.Image) -> str:
 # MULTI-STAGE VERIFICATION PROMPTS
 # =============================================================================
 
-LAYOUT_ANALYSIS_PROMPT = """Analyze this image's structural layout BEFORE extracting text.
+LAYOUT_ANALYSIS_PROMPT = """You are a precise OCR system. Convert this image into structured data.
 
-Describe in order:
-1. LAYOUT TYPE: (single-column, multi-column, table, form, mixed)
-2. STRUCTURAL ELEMENTS: List headers, footers, sidebars, captions
-3. DATA BLOCKS: Identify distinct text regions (numbered 1, 2, 3...)
-4. TABLE DETECTION: If tables exist, describe rows/columns
-5. READING ORDER: Specify the logical reading sequence
+If the image contains a table, list, or grid of data (like employee records):
+1. Extract it as a Markdown table using | column | column | format
+2. Include EVERY row and column you see
+3. Do not skip or summarize any entries
+4. Maintain exact column alignment with proper | separators
+5. Use |---|---| for the header separator line
 
-Then extract ALL text, maintaining the structure you identified.
-Separate distinct blocks with [BLOCK N] markers.
-Include ALL text, numbers, symbols, and data visible."""
+Example:
+| Name | Age | ID |
+|------|-----|-----|
+| John | 25  | 001 |
+
+If the image contains regular text:
+1. Extract ALL text exactly as written
+2. Preserve line breaks, spacing, and formatting
+3. Include headers, footers, page numbers, captions
+4. Do NOT paraphrase or summarize
+
+CRITICAL RULES:
+- Extract EVERY visible character, number, and symbol
+- For dense text (small font), zoom in mentally and read carefully
+- If uncertain about a character, make your best guess
+- Do NOT add commentary or explanations
+- Output only the extracted data
+
+Begin extraction now."""
 
 CONFIDENCE_EVALUATION_PROMPT = """You are an OCR quality evaluator. Analyze this transcription for errors.
 
@@ -163,8 +180,12 @@ async def _stage1_layout_ocr(image: Image.Image, b64: str) -> Tuple[str, str]:
                 }
             ]
         }],
-        max_tokens=config.tokens.vision_max_tokens,
-        temperature=0.2  # Lower temp for more consistent structure detection
+        max_tokens=4096,  # 8B model can handle longer outputs
+        temperature=0.0,  # Perfect determinism for OCR
+        top_p=1.0,  # Greedy decoding
+        extra_body={
+            "repetition_penalty": 1.0  # Don't penalize repetitive text in lists/tables
+        }
     )
 
     result = response.choices[0].message.content or ""
@@ -260,6 +281,8 @@ async def _stage3_self_correct(
 
             corrected = response.choices[0].message.content or ocr_text
             corrected = filter_cjk(corrected.strip())
+            # CRITICAL: Remove thinking tags before storing
+            corrected = clean_thinking(corrected)
 
             # Count corrections (simple heuristic: character differences)
             corrections = sum(1 for a, b in zip(ocr_text, corrected) if a != b)
@@ -308,6 +331,10 @@ async def analyze_image(
 
             # === STAGE 1: Layout-Aware OCR ===
             ocr_text, layout_desc = await _stage1_layout_ocr(resized, b64)
+
+            # Clean thinking tags immediately after extraction
+            ocr_text = clean_thinking(ocr_text)
+            layout_desc = clean_thinking(layout_desc)
 
             if not ocr_text or ocr_text == "[No description]":
                 return "[No description]"

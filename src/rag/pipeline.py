@@ -190,66 +190,118 @@ Answer the user's question using ONLY the above content."""
         # Acquire semaphore through traffic controller's concurrency control
         semaphore = traffic_controller._semaphores[ModelType.REASONING]
 
-        # Wait for rate limit
-        await traffic_controller.wait_for_rate_limit(ModelType.REASONING)
+        # AUTO-CONTINUATION LOOP
+        full_response = ""
+        continuation_count = 0
+        max_continuations = config.generation.max_continuations
+        enable_auto_continuation = config.generation.enable_auto_continuation
+        last_finish_reason = None
 
-        async with semaphore:
-            # Track request stats
-            traffic_controller._stats.total_requests += 1
-            traffic_controller._stats.reasoning_requests += 1
+        while continuation_count <= max_continuations:
+            # Check for cancellation
+            cancelled = cl.user_session.get("cancelled", False)
+            if cancelled:
+                print("🛑 Cancelled by user")
+                cl.user_session.set("cancelled", False)
+                break
 
-            stream = await reasoning_client.chat.completions.create(
-                model=config.models.reasoning_model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=config.generation.top_p,
-                stream=True
-            )
+            # Build continuation messages
+            if continuation_count == 0:
+                # First generation - use original messages
+                current_messages = messages
+            else:
+                # Continuation - append assistant's partial response and continuation prompt
+                current_messages = messages + [
+                    {"role": "assistant", "content": full_response},
+                    {"role": "user", "content": "Please continue from where you left off. Do not repeat what you already said."}
+                ]
+                print(f"🔄 Continuation {continuation_count}: Resuming generation...")
 
-            full_response = ""
-            thinking_shown = False
+            # Wait for rate limit
+            await traffic_controller.wait_for_rate_limit(ModelType.REASONING)
 
-            async for chunk in stream:
-                # Check for cancellation
-                cancelled = cl.user_session.get("cancelled", False)
-                if cancelled:
-                    print("🛑 Cancelled")
-                    cl.user_session.set("cancelled", False)
-                    break
+            async with semaphore:
+                # Track request stats
+                traffic_controller._stats.total_requests += 1
+                traffic_controller._stats.reasoning_requests += 1
 
-                if chunk.choices[0].delta.content:
-                    token = chunk.choices[0].delta.content
+                stream = await reasoning_client.chat.completions.create(
+                    model=config.models.reasoning_model,
+                    messages=current_messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=config.generation.top_p,
+                    stream=True
+                )
 
-                    if config.generation.filter_thinking_tags:
-                        filtered, is_thinking = thinking_filter.process(token)
+                thinking_shown = False
+                chunk_response = ""
 
-                        if is_thinking and not thinking_shown:
-                            await msg.stream_token("🤔 ")
-                            thinking_shown = True
+                async for chunk in stream:
+                    # Check for cancellation mid-stream
+                    cancelled = cl.user_session.get("cancelled", False)
+                    if cancelled:
+                        print("🛑 Cancelled during streaming")
+                        cl.user_session.set("cancelled", False)
+                        break
 
-                        if filtered:
-                            clean = filter_cjk(filtered)
-                            if clean:
-                                full_response += clean
-                                await msg.stream_token(clean)
-                    else:
-                        clean = filter_cjk(token)
-                        full_response += clean
-                        await msg.stream_token(clean)
+                    if chunk.choices[0].delta.content:
+                        token = chunk.choices[0].delta.content
 
-                if chunk.choices[0].finish_reason:
-                    break
+                        if config.generation.filter_thinking_tags:
+                            filtered, is_thinking = thinking_filter.process(token)
 
-            # Flush remaining (original logic)
-            remaining = thinking_filter.flush()
-            if remaining:
-                clean = filter_cjk(remaining)
-                full_response += clean
-                await msg.stream_token(clean)
+                            if is_thinking and not thinking_shown:
+                                await msg.stream_token("🤔 ")
+                                thinking_shown = True
 
-            # Update circuit breaker on success
-            traffic_controller._update_circuit_breaker(ModelType.REASONING, error=False)
+                            if filtered:
+                                clean = filter_cjk(filtered)
+                                if clean:
+                                    chunk_response += clean
+                                    full_response += clean
+                                    await msg.stream_token(clean)
+                        else:
+                            clean = filter_cjk(token)
+                            chunk_response += clean
+                            full_response += clean
+                            await msg.stream_token(clean)
+
+                    if chunk.choices[0].finish_reason:
+                        last_finish_reason = chunk.choices[0].finish_reason
+                        print(f"🛑 Stream finished: {last_finish_reason}")
+                        break
+
+                # Flush remaining (original logic)
+                remaining = thinking_filter.flush()
+                if remaining:
+                    clean = filter_cjk(remaining)
+                    chunk_response += clean
+                    full_response += clean
+                    await msg.stream_token(clean)
+
+                # Update circuit breaker on success
+                traffic_controller._update_circuit_breaker(ModelType.REASONING, error=False)
+
+            # Check if we should continue
+            if last_finish_reason == "length" and enable_auto_continuation:
+                # Hit token limit - continue automatically
+                continuation_count += 1
+                print(f"⚡ Token limit reached, auto-continuing ({continuation_count}/{max_continuations})...")
+                continue
+            elif last_finish_reason in ("stop", "eos"):
+                # Natural completion
+                print(f"✅ Response completed naturally ({last_finish_reason})")
+                break
+            else:
+                # Unknown reason, cancellation, or auto-continuation disabled
+                if last_finish_reason == "length" and not enable_auto_continuation:
+                    print(f"⚠️ Token limit reached but auto-continuation is disabled")
+                break
+
+        if continuation_count > max_continuations:
+            print(f"⚠️ Reached max continuations ({max_continuations}), stopping")
+            await msg.stream_token("\n\n[Response truncated: reached maximum continuation limit]")
 
         full_response = clean_thinking(full_response)
         await msg.update()

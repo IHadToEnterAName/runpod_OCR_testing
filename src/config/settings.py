@@ -95,6 +95,10 @@ class GenerationConfig:
     filter_thinking_tags: bool = True
     thinking_timeout_seconds: int = 30
 
+    # Auto-continuation when hitting token limits
+    enable_auto_continuation: bool = True
+    max_continuations: int = 5
+
 # =============================================================================
 # ENHANCED OCR CONFIGURATION
 # =============================================================================

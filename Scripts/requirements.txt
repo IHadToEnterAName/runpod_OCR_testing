@@ -1,94 +1,77 @@
-# Core ML Framework
-torch==2.1.0
-torchvision==0.16.0
-torchaudio==2.1.0
+# =============================================================================
+# RAG Document Assistant - Requirements
+# =============================================================================
+# Compatible versions for Python 3.10+ with Blackwell GPU support
+# Last updated: 2025
 
-# Transformers & Embeddings
-transformers==4.36.2
-sentence-transformers==2.3.1
-tiktoken==0.5.2
+# --- IMPORTANT: PyTorch Installation ---
+# For Blackwell GPU (SM 12.0), install PyTorch separately FIRST:
+#   pip install torch>=2.6.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+#
+# Then install vLLM from source (see setup_vllm.sh)
+# Finally, install the rest: pip install -r requirements.txt
 
-# LangChain & LangGraph
-langchain==0.1.0
-langchain-community==0.0.10
-langchain-core==0.1.10
-langchain-openai==0.0.2
-langgraph==0.0.20
+# --- Core ML Framework (Install separately with CUDA 12.8 support) ---
+# torch>=2.6.0  # Installed separately via --index-url
+# torchvision>=0.17.0  # Installed with torch
+# torchaudio>=2.2.0  # Installed with torch
 
-# Vector Store
-chromadb==0.4.22
+# --- Transformers & Embeddings ---
+transformers>=4.40.0
+sentence-transformers>=3.0.0
+tiktoken>=0.7.0
+einops  # Required by nomic embedding model
 
-# Cache & State
-redis==5.0.1
-hiredis==2.2.3
+# --- LangChain Stack ---
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-core>=0.2.0
+langchain-text-splitters>=0.2.0
+langgraph>=0.2.0
 
-# Document Processing
-pymupdf==1.23.8
-python-docx==1.1.0
-pypdf==3.17.4
-pillow==10.1.0
+# --- Vector Store ---
+chromadb>=0.5.0
 
-# Airflow
-apache-airflow==2.8.0
-apache-airflow-providers-redis==3.4.0
-apache-airflow-providers-postgres==5.10.0
+# --- Cache & State ---
+redis>=5.0.0
+hiredis>=2.3.0
 
-# Web Framework
-chainlit==1.0.0
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
+# --- Document Processing ---
+PyMuPDF>=1.24.0
+python-docx>=1.1.0
+Pillow>=10.0.0
 
-# OpenAI Client (for vLLM)
-openai==1.6.1
-httpx==0.25.2
+# --- Web Framework ---
+chainlit>=1.1.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
 
-# Utilities
-numpy==1.24.3
-pandas==2.0.3
-pydantic==2.5.3
-python-dotenv==1.0.0
-pyyaml==6.0.1
+# --- OpenAI Client (for vLLM) ---
+openai>=1.30.0
+httpx>=0.27.0
 
-# Database
-psycopg2-binary==2.9.9
-sqlalchemy==2.0.25
+# --- Utilities ---
+numpy>=1.26.0,<2.2.0  # Pin to avoid breaking changes
+pandas>=2.2.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
 
-# Development
-pytest==7.4.3
-pytest-asyncio==0.21.1
-black==23.12.1
-flake8==7.0.0
+# --- Database (Optional - only if using Airflow) ---
+# psycopg2-binary>=2.9.9
+# sqlalchemy>=2.0.0
+# apache-airflow==2.8.0
+# apache-airflow-providers-redis==3.4.0
 
+# --- vLLM Optimization ---
+hf_transfer
+uvloop
 
+# --- Typing ---
+typing-extensions>=4.10.0
 
-# --- Core Framework & Orchestration ---
-chainlit==2.9.4
-langgraph==0.2.66
-langchain-core==0.3.29
-
-# --- API & Networking ---
-httpx==0.28.1
-openai==1.59.6
-
-# --- Document Processing & Extraction ---
-PyMuPDF==1.26.7
-python-docx==1.2.0
-langchain-text-splitters==0.3.4
-
-# --- AI & Machine Learning ---
-sentence-transformers==3.3.1
-tiktoken          # REQUIRED for token counting and context trimming
-torch==2.5.1
-torchvision       # REQUIRED for Qwen2.5-VL Vision Processing
-numpy==2.1.0
-
-# --- vLLM & Blackwell Optimization ---
-hf_transfer       # Enables high-speed model downloads
-uvloop            # High-performance event loop for vLLM servers
-# vllm            # (Installed from source, but listed for reference)
-
-# --- Image Handling ---
-Pillow==11.1.0
-
-# --- Typing & Utilities ---
-typing-extensions==4.12.2
+# --- Development (optional) ---
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+black>=24.0.0
+flake8>=7.0.0

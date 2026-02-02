@@ -112,6 +112,125 @@ Continuing topics: {continuing}
 
 """
 
+# Batch processing constants
+CONTEXT_BATCH_SIZE = 5   # Pages per LLM call (reduces 78 calls to ~16)
+MIN_PAGE_LENGTH = 100    # Skip context extraction for very short pages
+IMAGE_CONCURRENCY = 4    # Concurrent image analyses
+
+BATCH_CONTEXT_EXTRACTION_PROMPT = """Analyze each page below and extract contextual information for each one.
+
+PREVIOUS CONTEXT FROM EARLIER PAGES:
+{prev_context}
+
+{pages_content}
+
+For EACH page ({page_numbers}), provide output in this EXACT format:
+
+=== PAGE [number] ===
+KEY_ENTITIES: entity1, entity2, entity3
+THEMES: theme1, theme2, theme3
+SUMMARY: 2-3 sentence summary.
+UNRESOLVED: item1, item2
+CONTINUING: topic1, topic2
+
+Output one block per page. Keep summaries concise."""
+
+
+async def extract_batch_page_contexts(
+    pages: List[Tuple[int, str]],
+    prev_context: Optional[PageContext] = None
+) -> List[PageContext]:
+    """
+    Extract contextual information from multiple pages in a single LLM call.
+    Reduces N sequential calls to 1 call per batch.
+    """
+    if not pages:
+        return []
+
+    try:
+        prev_context_str = ""
+        if prev_context:
+            prev_context_str = (
+                f"Previous Summary: {prev_context.summary}\n"
+                f"Key Entities: {', '.join(prev_context.key_entities[:10])}\n"
+                f"Continuing Topics: {', '.join(prev_context.continuing_topics)}"
+            )
+
+        # Build multi-page content
+        pages_content = ""
+        for page_num, content in pages:
+            pages_content += f"\n--- PAGE {page_num} ---\n{content[:3000]}\n"
+
+        response = await reasoning_client.chat.completions.create(
+            model=config.models.reasoning_model,
+            messages=[{
+                "role": "user",
+                "content": BATCH_CONTEXT_EXTRACTION_PROMPT.format(
+                    prev_context=prev_context_str if prev_context_str else "None (first batch)",
+                    pages_content=pages_content,
+                    page_numbers=", ".join(str(pn) for pn, _ in pages)
+                )
+            }],
+            max_tokens=min(256 * len(pages), 2048),
+            temperature=0.2
+        )
+
+        result = response.choices[0].message.content or ""
+
+        # Parse response into individual page contexts
+        contexts = []
+        page_sections = re.split(r'===\s*PAGE\s+(\d+)\s*===', result)
+
+        # page_sections alternates: [preamble, page_num, content, page_num, content, ...]
+        for i in range(1, len(page_sections) - 1, 2):
+            page_num = int(page_sections[i])
+            section = page_sections[i + 1]
+
+            entities = []
+            themes = []
+            summary = ""
+            unresolved = []
+            continuing = []
+
+            for line in section.split('\n'):
+                line = line.strip()
+                if line.startswith('KEY_ENTITIES:'):
+                    entities = [e.strip() for e in line[13:].split(',') if e.strip()]
+                elif line.startswith('THEMES:'):
+                    themes = [t.strip() for t in line[7:].split(',') if t.strip()]
+                elif line.startswith('SUMMARY:'):
+                    summary = line[8:].strip()
+                elif line.startswith('UNRESOLVED:'):
+                    unresolved = [u.strip() for u in line[11:].split(',') if u.strip()]
+                elif line.startswith('CONTINUING:'):
+                    continuing = [c.strip() for c in line[11:].split(',') if c.strip()]
+
+            contexts.append(PageContext(
+                page_number=page_num,
+                key_entities=entities[:20],
+                themes=themes[:5],
+                summary=summary[:500],
+                unresolved_references=unresolved[:10],
+                continuing_topics=continuing[:5]
+            ))
+
+        # If parsing failed, return empty contexts for each page
+        if not contexts:
+            return [PageContext(
+                page_number=pn, key_entities=[], themes=[],
+                summary="", unresolved_references=[], continuing_topics=[]
+            ) for pn, _ in pages]
+
+        return contexts
+
+    except Exception as e:
+        print(f"⚠️ Batch context extraction error: {e}")
+        return [PageContext(
+            page_number=pn, key_entities=[], themes=[],
+            summary="", unresolved_references=[], continuing_topics=[]
+        ) for pn, _ in pages]
+
+
 async def extract_page_context(
     page_num: int,
     content: str,
@@ -139,7 +258,7 @@ Continuing Topics: {', '.join(prev_context.continuing_topics)}
                     prev_context=prev_context_str
                 )
             }],
-            max_tokens=512,
+            max_tokens=256,
             temperature=0.2
         )
 
@@ -308,63 +427,67 @@ async def process_files(
                 progress.content = f"📄 Processing {len(pages_with_layout)} pages with layout awareness..."
                 await progress.update()
 
-                # Process pages with context stitching
+                # Process pages with batched context stitching
                 all_docs = []
                 all_metas = []
                 all_ids = []
                 prev_context = None
 
-                for page_num, page_text, layout in pages_with_layout:
-                    # Build context bridge from previous pages
-                    context_bridge = ""
-                    if enable_context_stitching and page_num > 1:
-                        context_bridge = build_context_bridge(doc_context, page_num)
+                for batch_start in range(0, len(pages_with_layout), CONTEXT_BATCH_SIZE):
+                    batch = pages_with_layout[batch_start:batch_start + CONTEXT_BATCH_SIZE]
 
-                    # Combine context bridge with page content
-                    enriched_text = context_bridge + page_text if context_bridge else page_text
-
-                    # Extract context for next page (async)
+                    # Batch extract contexts (skip short pages)
                     if enable_context_stitching:
-                        try:
-                            page_context = await extract_page_context(
-                                page_num,
-                                page_text,
-                                prev_context
+                        eligible = [
+                            (pn, pt) for pn, pt, _ in batch
+                            if len(pt.strip()) >= MIN_PAGE_LENGTH
+                        ]
+                        if eligible:
+                            try:
+                                batch_contexts = await extract_batch_page_contexts(
+                                    eligible, prev_context
+                                )
+                                for pc in batch_contexts:
+                                    update_document_context(doc_context, pc)
+                                if batch_contexts:
+                                    prev_context = batch_contexts[-1]
+                            except Exception as e:
+                                print(f"⚠️ Batch context extraction error: {e}")
+
+                    # Chunk all pages in this batch
+                    for page_num, page_text, layout in batch:
+                        context_bridge = ""
+                        if enable_context_stitching and page_num > 1:
+                            context_bridge = build_context_bridge(doc_context, page_num)
+
+                        enriched_text = context_bridge + page_text if context_bridge else page_text
+
+                        if enable_semantic_chunking:
+                            chunks = hybrid_chunker.split_text(enriched_text, prefer_semantic=True)
+                        else:
+                            chunks = text_splitter.split_text(enriched_text)
+
+                        for idx, chunk in enumerate(chunks):
+                            all_docs.append(chunk)
+
+                            meta = {
+                                "page_number": page_num,
+                                "source": fname,
+                                "chunk_type": "text",
+                                "layout_type": layout.layout_type,
+                                "num_columns": layout.num_columns,
+                                "has_tables": len(layout.tables) > 0
+                            }
+
+                            if enable_context_stitching and page_num in doc_context.page_contexts:
+                                pc = doc_context.page_contexts[page_num]
+                                meta["themes"] = ','.join(pc.themes[:3])
+                                meta["key_entities"] = ','.join(pc.key_entities[:5])
+
+                            all_metas.append(meta)
+                            all_ids.append(
+                                f"{fname}_p{page_num}_c{idx}_{uuid.uuid4().hex[:6]}"
                             )
-                            update_document_context(doc_context, page_context)
-                            prev_context = page_context
-                        except Exception as e:
-                            print(f"⚠️ Context extraction skipped for p{page_num}: {e}")
-
-                    # Chunk the enriched text (semantic or character-based)
-                    if enable_semantic_chunking:
-                        chunks = hybrid_chunker.split_text(enriched_text, prefer_semantic=True)
-                    else:
-                        chunks = text_splitter.split_text(enriched_text)
-
-                    for idx, chunk in enumerate(chunks):
-                        all_docs.append(chunk)
-
-                        # Enhanced metadata
-                        meta = {
-                            "page_number": page_num,
-                            "source": fname,
-                            "chunk_type": "text",
-                            "layout_type": layout.layout_type,
-                            "num_columns": layout.num_columns,
-                            "has_tables": len(layout.tables) > 0
-                        }
-
-                        # Add context info if available
-                        if enable_context_stitching and page_num in doc_context.page_contexts:
-                            pc = doc_context.page_contexts[page_num]
-                            meta["themes"] = ','.join(pc.themes[:3])
-                            meta["key_entities"] = ','.join(pc.key_entities[:5])
-
-                        all_metas.append(meta)
-                        all_ids.append(
-                            f"{fname}_p{page_num}_c{idx}_{uuid.uuid4().hex[:6]}"
-                        )
             else:
                 # Fallback to original extraction
                 pages = await loop.run_in_executor(
@@ -381,42 +504,49 @@ async def process_files(
                 all_ids = []
                 prev_context = None
 
-                for page_num, page_text in pages:
-                    # Context stitching even without layout awareness
-                    context_bridge = ""
-                    if enable_context_stitching and page_num > 1:
-                        context_bridge = build_context_bridge(doc_context, page_num)
+                for batch_start in range(0, len(pages), CONTEXT_BATCH_SIZE):
+                    batch = pages[batch_start:batch_start + CONTEXT_BATCH_SIZE]
 
-                    enriched_text = context_bridge + page_text if context_bridge else page_text
-
+                    # Batch extract contexts (skip short pages)
                     if enable_context_stitching:
-                        try:
-                            page_context = await extract_page_context(
-                                page_num,
-                                page_text,
-                                prev_context
+                        eligible = [
+                            (pn, pt) for pn, pt in batch
+                            if len(pt.strip()) >= MIN_PAGE_LENGTH
+                        ]
+                        if eligible:
+                            try:
+                                batch_contexts = await extract_batch_page_contexts(
+                                    eligible, prev_context
+                                )
+                                for pc in batch_contexts:
+                                    update_document_context(doc_context, pc)
+                                if batch_contexts:
+                                    prev_context = batch_contexts[-1]
+                            except Exception as e:
+                                print(f"⚠️ Batch context extraction error: {e}")
+
+                    for page_num, page_text in batch:
+                        context_bridge = ""
+                        if enable_context_stitching and page_num > 1:
+                            context_bridge = build_context_bridge(doc_context, page_num)
+
+                        enriched_text = context_bridge + page_text if context_bridge else page_text
+
+                        if enable_semantic_chunking:
+                            chunks = hybrid_chunker.split_text(enriched_text, prefer_semantic=True)
+                        else:
+                            chunks = text_splitter.split_text(enriched_text)
+
+                        for idx, chunk in enumerate(chunks):
+                            all_docs.append(chunk)
+                            all_metas.append({
+                                "page_number": page_num,
+                                "source": fname,
+                                "chunk_type": "text"
+                            })
+                            all_ids.append(
+                                f"{fname}_p{page_num}_c{idx}_{uuid.uuid4().hex[:6]}"
                             )
-                            update_document_context(doc_context, page_context)
-                            prev_context = page_context
-                        except Exception as e:
-                            print(f"⚠️ Context extraction skipped for p{page_num}: {e}")
-
-                    # Chunk the enriched text (semantic or character-based)
-                    if enable_semantic_chunking:
-                        chunks = hybrid_chunker.split_text(enriched_text, prefer_semantic=True)
-                    else:
-                        chunks = text_splitter.split_text(enriched_text)
-
-                    for idx, chunk in enumerate(chunks):
-                        all_docs.append(chunk)
-                        all_metas.append({
-                            "page_number": page_num,
-                            "source": fname,
-                            "chunk_type": "text"
-                        })
-                        all_ids.append(
-                            f"{fname}_p{page_num}_c{idx}_{uuid.uuid4().hex[:6]}"
-                        )
 
             print(f"📊 Created {len(all_docs)} chunks from {fname}")
 
@@ -454,28 +584,36 @@ async def process_files(
             )
 
             if images:
-                for j, (page_num, img) in enumerate(images):
-                    progress.content = f"🖼️ Analyzing image {j+1}/{len(images)} with verification..."
+                # Process images in parallel batches
+                for batch_start in range(0, len(images), IMAGE_CONCURRENCY):
+                    batch = images[batch_start:batch_start + IMAGE_CONCURRENCY]
+
+                    progress.content = f"🖼️ Analyzing images {batch_start+1}-{batch_start+len(batch)}/{len(images)}..."
                     await progress.update()
 
-                    # Use enhanced analyze_image with verification
-                    desc = await analyze_image(img, page_num, j+1, enable_verification=True)
+                    # Launch batch in parallel
+                    tasks = [
+                        analyze_image(img, page_num, batch_start + j + 1, enable_verification=True)
+                        for j, (page_num, img) in enumerate(batch)
+                    ]
+                    descriptions = await asyncio.gather(*tasks)
 
-                    img_embedding = embed_documents([desc])[0]
+                    # Embed and store results
+                    for j, ((page_num, img), desc) in enumerate(zip(batch, descriptions)):
+                        img_embedding = embed_documents([desc])[0]
 
-                    collection.add(
-                        documents=[desc],
-                        embeddings=[img_embedding],
-                        metadatas=[{
-                            "page_number": page_num,
-                            "source": fname,
-                            "chunk_type": "image"
-                        }],
-                        ids=[f"{fname}_img_p{page_num}_{j}_{uuid.uuid4().hex[:6]}"]
-                    )
+                        collection.add(
+                            documents=[desc],
+                            embeddings=[img_embedding],
+                            metadatas=[{
+                                "page_number": page_num,
+                                "source": fname,
+                                "chunk_type": "image"
+                            }],
+                            ids=[f"{fname}_img_p{page_num}_{batch_start+j}_{uuid.uuid4().hex[:6]}"]
+                        )
 
-                    total_chunks += 1
-                    await asyncio.sleep(0.2)
+                        total_chunks += 1
         
         # DOCX PROCESSING
         elif fname.lower().endswith('.docx'):
