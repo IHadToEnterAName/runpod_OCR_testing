@@ -98,3 +98,5 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+ijabah.pem
+*.Identifier
