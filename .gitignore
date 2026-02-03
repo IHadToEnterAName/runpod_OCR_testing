@@ -98,3 +98,7 @@ Thumbs.db
 tmp/
 temp/
 *.tmp
+
+
+# Certificate Files
+*.pem
