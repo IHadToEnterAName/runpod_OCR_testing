@@ -17,9 +17,9 @@ from typing import Optional
 class ModelConfig:
     """Single Qwen3-VL model endpoint configuration."""
 
-    # Qwen3-VL-32B-AWQ via vLLM (port 8001)
-    base_url: str = os.getenv("VLLM_URL", "http://localhost:8001/v1")
-    model_name: str = os.getenv("VLLM_MODEL", "Qwen/Qwen3-VL-32B-Instruct-AWQ")
+    # Qwen3-VL-32B-AWQ via vLLM (port 8005)
+    base_url: str = os.getenv("VLLM_URL", "http://localhost:8005/v1")
+    model_name: str = os.getenv("VLLM_MODEL", "QuantTrio/Qwen3-VL-32B-Instruct-AWQ")
 
 # =============================================================================
 # BYALDI (ColQwen2) CONFIGURATION
@@ -164,13 +164,11 @@ CRITICAL RULES:
 1. You will receive actual page IMAGES from uploaded documents
 2. Use ONLY the visual content in these images to answer questions
 3. For each claim, reference the specific page number
-4. When asked to locate specific information, provide bounding box coordinates as [ymin, xmin, ymax, xmax] normalized to 0-1000
-5. If information isn't visible in the provided pages, say "This isn't visible in the retrieved pages"
+4. If information isn't visible in the provided pages, say "This isn't visible in the retrieved pages"
 
 FORMAT:
 - Be direct, start with the answer
 - Reference page numbers: (Page X)
-- When grounding is requested, format bounding boxes as: <box>[ymin, xmin, ymax, xmax]</box>
 - English only"""
 
 # =============================================================================

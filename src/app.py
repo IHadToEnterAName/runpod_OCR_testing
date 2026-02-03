@@ -6,7 +6,6 @@ Byaldi (ColQwen2) + Qwen3-VL-32B-AWQ architecture.
 """
 
 import chainlit as cl
-import uuid
 
 from config.settings import get_config
 from rag.memory import ConversationMemory
@@ -21,29 +20,48 @@ from rag.cache import get_cache
 
 config = get_config()
 
+# Persistent index name shared across all sessions
+PERSISTENT_INDEX = "documents"
+
 # =============================================================================
 # CHAINLIT HANDLERS
 # =============================================================================
 
 @cl.on_chat_start
 async def start():
-    """Initialize session with Byaldi index."""
+    """Initialize session with persistent Byaldi index."""
 
-    # Create unique index name for this session
-    session_id = str(uuid.uuid4())[:8]
-    index_name = f"docs_{session_id}"
+    store = get_visual_store()
+
+    # Check if an existing index is already on disk
+    has_existing = store.index_exists_on_disk(PERSISTENT_INDEX)
+    if has_existing:
+        store.load_existing_index(PERSISTENT_INDEX)
+        stats = store.get_stats(PERSISTENT_INDEX)
+        page_count = stats["total_pages"]
+        doc_count = stats["document_count"]
+    else:
+        page_count = 0
+        doc_count = 0
 
     # Store in session
-    cl.user_session.set("index_name", index_name)
+    cl.user_session.set("index_name", PERSISTENT_INDEX)
     cl.user_session.set("files", [])
     cl.user_session.set("memory", ConversationMemory())
     cl.user_session.set("cancelled", False)
-    cl.user_session.set("has_documents", False)
+    cl.user_session.set("has_documents", has_existing)
 
-    print(f"Session started: {index_name}")
+    print(f"Session started (index: {PERSISTENT_INDEX}, existing: {has_existing})")
 
-    # Ask for files
-    files = await cl.AskFileMessage(
+    # Non-blocking welcome message
+    existing_info = ""
+    if has_existing:
+        existing_info = (
+            f"\n\n**Existing index loaded:** {page_count} pages from {doc_count} document(s).\n"
+            f"You can ask questions or upload more files."
+        )
+
+    await cl.Message(
         content=f"**Visual Document Assistant**\n\n"
                 f"**Model:** {config.models.model_name}\n"
                 f"**Retrieval:** Byaldi (ColQwen2)\n\n"
@@ -52,21 +70,9 @@ async def start():
                 f"- Visual page search\n"
                 f"- Grounded answers with bounding boxes\n"
                 f"- Page-aware retrieval\n\n"
-                f"Upload files to start!",
-        accept=[
-            "application/pdf",
-            "image/png",
-            "image/jpeg",
-            "image/webp"
-        ],
-        max_size_mb=50,
-        timeout=300
+                f"Upload files or ask a question to start!"
+                f"{existing_info}"
     ).send()
-
-    if files:
-        file_list = cl.user_session.get("files")
-        await process_files(files, index_name, file_list, is_first_upload=True)
-        cl.user_session.set("has_documents", True)
 
 
 @cl.on_stop
@@ -89,20 +95,18 @@ async def on_message(message: cl.Message):
     # === COMMANDS ===
 
     if query.lower() == '/clear':
-        # Delete index and create fresh one
+        # Delete persistent index and reset
         store = get_visual_store()
-        store.delete_index(index_name)
+        store.delete_index(PERSISTENT_INDEX)
 
         cache = get_cache()
-        cache.clear_index_cache(index_name)
+        cache.clear_index_cache(PERSISTENT_INDEX)
 
-        new_name = f"docs_{str(uuid.uuid4())[:8]}"
-        cl.user_session.set("index_name", new_name)
         cl.user_session.set("files", [])
         cl.user_session.set("has_documents", False)
         memory.clear()
 
-        await cl.Message(content="Cleared. Ready for new files.").send()
+        await cl.Message(content="Cleared all documents. Ready for new files.").send()
         return
 
     if query.lower() == '/files':
@@ -179,16 +183,8 @@ async def on_message(message: cl.Message):
 
 @cl.on_chat_end
 async def on_end():
-    """Cleanup on session end."""
-    index_name = cl.user_session.get("index_name")
-    if index_name:
-        store = get_visual_store()
-        store.delete_index(index_name)
-
-        cache = get_cache()
-        cache.clear_index_cache(index_name)
-
-        print(f"Session ended, cleaned up: {index_name}")
+    """Session ended - index is preserved for future sessions."""
+    print(f"Session ended (index '{PERSISTENT_INDEX}' preserved on disk)")
 
 
 # =============================================================================

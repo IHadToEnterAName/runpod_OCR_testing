@@ -4,7 +4,7 @@
 # =============================================================================
 #
 # This script starts the entire stack:
-# 1. vLLM server (Qwen3-VL-32B-AWQ on host, port 8001)
+# 1. vLLM server (Qwen3-VL-32B-AWQ on host, port 8005)
 # 2. Docker stack (Redis + RAG App with Byaldi/ColQwen2)
 #
 # Usage: ./start.sh [options]
@@ -67,11 +67,11 @@ if [ -f "$DOCKER_DIR/.env" ]; then
 fi
 
 # Default values
-VLLM_PORT=${VLLM_PORT:-8001}
+VLLM_PORT=${VLLM_PORT:-8005}
 RAG_APP_PORT=${RAG_APP_PORT:-8080}
 VLLM_GPU_MEMORY=${VLLM_GPU_MEMORY:-0.80}
 VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-32768}
-VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3-VL-32B-Instruct-AWQ}
+VLLM_MODEL=${VLLM_MODEL:-QuantTrio/Qwen3-VL-32B-Instruct-AWQ}
 
 # Determine docker compose command
 if docker compose version &> /dev/null 2>&1; then
@@ -142,10 +142,11 @@ if [ "$START_VLLM" = true ]; then
     echo ""
     echo -e "${BLUE}Starting vLLM server...${NC}"
 
-    # Set cache paths
+    # Set cache paths and HF authentication
     export HF_HOME="$HOME/.cache/huggingface"
     export VLLM_CACHE_ROOT="$HOME/.cache/vllm"
     export VLLM_USE_V1=0
+    export HF_TOKEN="${HF_TOKEN:-}"
     unset TRANSFORMERS_CACHE
     mkdir -p "$HF_HOME" "$VLLM_CACHE_ROOT"
 

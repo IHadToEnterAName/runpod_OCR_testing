@@ -93,14 +93,19 @@ class VisualStore:
             overwrite=True
         )
 
+        # Get page count from the indexed data
+        page_count = self._get_page_count(index_name)
+        # For single images, Byaldi may not report count correctly
+        if page_count == 0:
+            page_count = 1
+
         # Track metadata for this index
         self._active_indexes[index_name] = {
             "documents": [file_name],
-            "path": index_path
+            "path": index_path,
+            "total_pages": page_count
         }
 
-        # Get page count from the indexed data
-        page_count = self._get_page_count(index_name)
         print(f"Indexed {page_count} pages from {file_name}")
 
         return page_count
@@ -125,11 +130,17 @@ class VisualStore:
             store_collection_with_index=config.byaldi.store_collection_with_index
         )
 
+        # Get updated page count
+        prev_count = self._active_indexes.get(index_name, {}).get("total_pages", 0)
+        page_count = self._get_page_count(index_name)
+        if page_count <= prev_count:
+            page_count = prev_count + 1  # At least 1 new page
+
         # Update metadata
         if index_name in self._active_indexes:
             self._active_indexes[index_name]["documents"].append(file_name)
+            self._active_indexes[index_name]["total_pages"] = page_count
 
-        page_count = self._get_page_count(index_name)
         print(f"Index {index_name} now has {page_count} pages")
 
         return page_count
@@ -205,8 +216,47 @@ class VisualStore:
         }
 
     def has_documents(self, index_name: str) -> bool:
-        """Check if an index has any documents."""
-        return self._get_page_count(index_name) > 0
+        """Check if an index has any documents (in memory or on disk)."""
+        if index_name in self._active_indexes:
+            return self._get_page_count(index_name) > 0
+        return self.index_exists_on_disk(index_name)
+
+    def index_exists_on_disk(self, index_name: str) -> bool:
+        """Check if a persisted index exists on disk."""
+        index_path = os.path.join(self._index_base_path, index_name)
+        if os.path.exists(index_path) and os.listdir(index_path):
+            return True
+        byaldi_path = os.path.join(".byaldi", index_name)
+        if os.path.exists(byaldi_path) and os.listdir(byaldi_path):
+            return True
+        return False
+
+    def load_existing_index(self, index_name: str) -> bool:
+        """
+        Load an existing index from disk into memory.
+
+        Returns:
+            True if index was loaded, False if not found.
+        """
+        if index_name in self._active_indexes:
+            return True
+
+        index_path = os.path.join(self._index_base_path, index_name)
+        if not os.path.exists(index_path):
+            return False
+
+        try:
+            model = self._get_model()
+            model.load_index(index_name)
+            self._active_indexes[index_name] = {
+                "documents": [],
+                "path": index_path
+            }
+            print(f"Loaded existing index: {index_name}")
+            return True
+        except Exception as e:
+            print(f"Failed to load index {index_name}: {e}")
+            return False
 
     # =========================================================================
     # INTERNAL HELPERS
@@ -229,9 +279,20 @@ class VisualStore:
         """Get the number of pages in an index."""
         try:
             model = self._get_model()
-            if hasattr(model, 'get_doc_ids'):
-                return len(model.get_doc_ids())
-            # Fallback: check metadata
+
+            # Try Byaldi/ColPali internal attributes
+            if hasattr(model, 'model'):
+                inner = model.model
+                # ColPaliModel stores embeddings per page
+                if hasattr(inner, 'indexed_embeddings') and inner.indexed_embeddings is not None:
+                    return len(inner.indexed_embeddings)
+                if hasattr(inner, 'collection') and inner.collection is not None:
+                    return len(inner.collection)
+                # doc_ids is a list with one entry per page
+                if hasattr(inner, 'doc_ids') and inner.doc_ids is not None:
+                    return len(inner.doc_ids)
+
+            # Fallback: manually tracked count
             meta = self._active_indexes.get(index_name, {})
             return meta.get("total_pages", 0)
         except Exception:

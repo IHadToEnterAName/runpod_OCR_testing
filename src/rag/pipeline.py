@@ -6,6 +6,7 @@ Replaces text-based RAG with visual document understanding.
 """
 
 import asyncio
+import re
 from typing import List, Optional
 import chainlit as cl
 from openai import AsyncOpenAI
@@ -43,6 +44,69 @@ def _get_semaphore():
     if _semaphore is None:
         _semaphore = asyncio.Semaphore(config.performance.model_concurrent_limit)
     return _semaphore
+
+# =============================================================================
+# BOX TAG FILTER (strips <box>...</box> from streamed output)
+# =============================================================================
+
+class BoxTagFilter:
+    """Filters <box>...</box> tags from streamed tokens in real-time."""
+
+    def __init__(self):
+        self._buffer = ""
+        self._in_tag = False
+
+    def feed(self, token: str) -> str:
+        """Feed a token, return text safe to display (boxes stripped)."""
+        self._buffer += token
+        output = ""
+
+        while self._buffer:
+            if self._in_tag:
+                close_pos = self._buffer.find("</box>")
+                if close_pos >= 0:
+                    self._buffer = self._buffer[close_pos + 6:]
+                    self._in_tag = False
+                    continue
+                # Could be partial "</box>" at end — keep buffering
+                for i in range(1, 7):
+                    if self._buffer.endswith("</box>"[:i]):
+                        return output
+                break  # no partial match either, keep waiting
+            else:
+                open_pos = self._buffer.find("<box>")
+                if open_pos >= 0:
+                    output += self._buffer[:open_pos]
+                    self._buffer = self._buffer[open_pos + 5:]
+                    self._in_tag = True
+                    continue
+                # Check for partial "<box>" at end of buffer
+                for i in range(1, 6):
+                    if self._buffer.endswith("<box>"[:i]):
+                        output += self._buffer[:-i]
+                        self._buffer = self._buffer[-i:]
+                        return output
+                output += self._buffer
+                self._buffer = ""
+                break
+
+        return output
+
+    def flush(self) -> str:
+        """Flush remaining buffer at end of stream."""
+        if self._in_tag:
+            self._buffer = ""
+            self._in_tag = False
+            return ""
+        result = self._buffer
+        self._buffer = ""
+        return result
+
+
+def strip_box_tags(text: str) -> str:
+    """Remove all <box>...</box> tags from text."""
+    return re.sub(r'<box>.*?</box>', '', text)
+
 
 # =============================================================================
 # VISUAL MESSAGE BUILDER
@@ -101,7 +165,7 @@ def build_visual_messages(
     if enable_grounding:
         content_items.append({
             "type": "text",
-            "text": "\nWhen referencing specific data points, provide bounding box coordinates as <box>[ymin, xmin, ymax, xmax]</box> (normalized 0-1000)."
+            "text": "\nUse visual grounding internally to locate information accurately on the page images. Do NOT include any bounding box coordinates or <box> tags in your response."
         })
 
     messages.append({"role": "user", "content": content_items})
@@ -204,6 +268,7 @@ async def generate_response(
         max_continuations = config.generation.max_continuations
         enable_auto_continuation = config.generation.enable_auto_continuation
         last_finish_reason = None
+        box_filter = BoxTagFilter()
 
         while continuation_count <= max_continuations:
             # Check for cancellation
@@ -246,12 +311,20 @@ async def generate_response(
                     if chunk.choices[0].delta.content:
                         token = chunk.choices[0].delta.content
                         full_response += token
-                        await msg.stream_token(token)
+                        # Stream filtered output (strips <box>...</box> tags)
+                        filtered = box_filter.feed(token)
+                        if filtered:
+                            await msg.stream_token(filtered)
 
                     if chunk.choices[0].finish_reason:
                         last_finish_reason = chunk.choices[0].finish_reason
                         print(f"Stream finished: {last_finish_reason}")
                         break
+
+                # Flush any remaining buffered text
+                remaining = box_filter.flush()
+                if remaining:
+                    await msg.stream_token(remaining)
 
             # Check if we should continue
             if last_finish_reason == "length" and enable_auto_continuation:
@@ -272,9 +345,9 @@ async def generate_response(
 
         await msg.update()
 
-        # Save to memory
+        # Save clean response to memory (strip any remaining box tags)
         if full_response:
-            memory.add(query, full_response)
+            memory.add(query, strip_box_tags(full_response))
 
         return full_response
 

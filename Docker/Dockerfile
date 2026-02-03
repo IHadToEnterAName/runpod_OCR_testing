@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     libgl1-mesa-glx \
     libglib2.0-0 \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -54,11 +55,14 @@ RUN pip install --no-cache-dir \
 # Layer 2: Byaldi + ColPali engine (visual retrieval)
 RUN pip install --no-cache-dir \
     byaldi>=0.0.5 \
-    colpali-engine>=0.3.0
+    "colpali-engine>=0.3.4,<0.4.0" \
+    pdf2image \
+    ninja
 
 # Layer 3: ML/Tokenization
 RUN pip install --no-cache-dir \
-    transformers>=4.40.0 \
+    transformers>=4.42.0 \
+    "peft>=0.14.0" \
     tiktoken>=0.7.0
 
 # Layer 4: Cache
@@ -110,11 +114,12 @@ ENV TRANSFORMERS_CACHE=/workspace/huggingface
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 ENV CUDA_VISIBLE_DEVICES=0
 
-# Pre-download ColQwen2 model so container doesn't need internet on startup
+# Pre-download ColQwen2 model weights (download only, no GPU needed)
+# The model will be loaded onto GPU at runtime
 RUN python -c "\
-from byaldi import RAGMultiModalModel; \
-model = RAGMultiModalModel.from_pretrained('vidore/colqwen2-v0.1'); \
-print('ColQwen2 model downloaded successfully')"
+from huggingface_hub import snapshot_download; \
+snapshot_download('vidore/colqwen2-v0.1'); \
+print('ColQwen2 model files downloaded successfully')"
 
 # Copy application code
 COPY src/ /workspace/src/

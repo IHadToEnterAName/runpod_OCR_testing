@@ -13,7 +13,9 @@
 
 # --- Visual Retrieval ---
 byaldi>=0.0.5
-colpali-engine>=0.3.0
+colpali-engine>=0.3.4,<0.4.0
+pdf2image
+ninja
 
 # --- Document Processing ---
 PyMuPDF>=1.24.0
@@ -21,7 +23,8 @@ python-docx>=1.1.0
 Pillow>=10.0.0
 
 # --- ML/Tokenization ---
-transformers>=4.40.0
+transformers>=4.42.0
+peft>=0.14.0
 tiktoken>=0.7.0
 
 # --- Cache ---

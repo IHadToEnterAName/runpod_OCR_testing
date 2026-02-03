@@ -51,8 +51,8 @@ services:
       - REDIS_PORT=${REDIS_PORT:-6379}
 
       # vLLM endpoint (on HOST machine)
-      - VLLM_URL=${VLLM_URL:-http://host.docker.internal:8001/v1}
-      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3-VL-32B-Instruct-AWQ}
+      - VLLM_URL=${VLLM_URL:-http://host.docker.internal:8005/v1}
+      - VLLM_MODEL=${VLLM_MODEL:-QuantTrio/Qwen3-VL-32B-Instruct-AWQ}
 
       # Byaldi model
       - BYALDI_MODEL=${BYALDI_MODEL:-vidore/colqwen2-v0.1}
@@ -73,6 +73,9 @@ services:
       # Generation settings
       - TEMPERATURE=${TEMPERATURE:-0.3}
       - MAX_TOKENS=${MAX_TOKENS:-4096}
+
+      # Hugging Face authentication
+      - HF_TOKEN=${HF_TOKEN:-}
 
       # Python settings
       - PYTHONPATH=/workspace/src
