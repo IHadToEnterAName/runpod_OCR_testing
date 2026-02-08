@@ -110,7 +110,6 @@ ENV PYTHONPATH=/workspace/src
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV HF_HOME=/workspace/huggingface
-ENV TRANSFORMERS_CACHE=/workspace/huggingface
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 ENV CUDA_VISIBLE_DEVICES=0
 
@@ -123,6 +122,10 @@ print('ColQwen2 model files downloaded successfully')"
 
 # Copy application code
 COPY src/ /workspace/src/
+
+# Copy Chainlit config and public assets
+COPY .chainlit/ /workspace/.chainlit/
+COPY public/ /workspace/public/
 
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

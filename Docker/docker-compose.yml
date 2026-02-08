@@ -23,7 +23,7 @@ services:
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
-      - redis_data:/data
+      - ../persistent/redis:/data
     command: redis-server --save 60 1 --loglevel warning --maxmemory 2gb --maxmemory-policy allkeys-lru
     restart: unless-stopped
     networks:
@@ -82,7 +82,6 @@ services:
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
       - HF_HOME=/workspace/huggingface
-      - TRANSFORMERS_CACHE=/workspace/huggingface
       - HF_HUB_ENABLE_HF_TRANSFER=1
       - NVIDIA_VISIBLE_DEVICES=all
 
@@ -91,10 +90,12 @@ services:
     volumes:
       # Mount source for development (remove in production)
       - ../src:/workspace/src:ro
-      # Persistent data and indexes
-      - ../data:/workspace/data
-      - byaldi_indexes:/workspace/data/indexes
-      - huggingface_cache:/workspace/huggingface
+      # Chainlit config and public assets
+      - ../.chainlit:/workspace/.chainlit:ro
+      - ../public:/workspace/public:ro
+      # Persistent bind mounts (survive container rebuilds and Docker prune)
+      - ../persistent/data:/workspace/data
+      - ../persistent/indexes:/workspace/data/indexes
     ports:
       - "${RAG_APP_PORT:-8080}:8000"
     extra_hosts:
@@ -107,17 +108,6 @@ services:
     restart: unless-stopped
     networks:
       - rag_network
-
-# =============================================================================
-# VOLUMES
-# =============================================================================
-volumes:
-  redis_data:
-    driver: local
-  byaldi_indexes:
-    driver: local
-  huggingface_cache:
-    driver: local
 
 # =============================================================================
 # NETWORKS

@@ -46,11 +46,8 @@ class ByaldiConfig:
 class VisualRAGConfig:
     """Visual RAG pipeline configuration."""
 
-    # Search: how many pages ColiVara/Byaldi returns
-    search_top_k: int = int(os.getenv("SEARCH_TOP_K", "10"))
-
-    # Rerank: how many pages Qwen3-VL selects from search results
-    rerank_top_k: int = int(os.getenv("RERANK_TOP_K", "5"))
+    # Search: how many pages Byaldi returns (sent directly to Qwen3-VL)
+    search_top_k: int = int(os.getenv("SEARCH_TOP_K", "5"))
 
     # Grounding: require bounding boxes in responses
     enable_grounding: bool = os.getenv("ENABLE_GROUNDING", "true").lower() == "true"
@@ -120,11 +117,11 @@ class RoutingConfig:
 
     enabled: bool = os.getenv("ROUTING_ENABLED", "true").lower() == "true"
 
-    # Search top_k adjustments by query type
-    page_specific_search_k: int = 5
-    summarization_search_k: int = 15
-    factual_search_k: int = 8
-    default_search_k: int = 10
+    # Search top_k adjustments by query type (pages go directly to generation)
+    page_specific_search_k: int = 3
+    summarization_search_k: int = 8
+    factual_search_k: int = 3
+    default_search_k: int = 5
 
     # Temperature adjustments
     factual_temperature: float = 0.1
@@ -158,18 +155,36 @@ class TrafficConfig:
 # SYSTEM PROMPT
 # =============================================================================
 
-SYSTEM_PROMPT = """You are a Visual Document Assistant. You analyze document page images provided to you.
+SYSTEM_PROMPT = """You are a Visual Document Assistant. You analyze document page images provided to you to answer user queries.
+
+CORE RESPONSIBILITIES:
+1. Analyze the provided page images (text, layout, tables, charts, handwritten notes).
+2. Answer user questions based STRICTLY on the visual evidence provided.
+3. Manage specific page requests accurately.
 
 CRITICAL RULES:
-1. You will receive actual page IMAGES from uploaded documents
-2. Use ONLY the visual content in these images to answer questions
-3. For each claim, reference the specific page number
-4. If information isn't visible in the provided pages, say "This isn't visible in the retrieved pages"
+1. **Source of Truth:** Use ONLY the visual content in the provided images. Do not use outside knowledge or assumptions to fill gaps.
+2. **Page Targeting:** - If the user specifies a page (e.g., "Summarize page 3"), check if that page is available.
+   - If yes: Derive the answer ONLY from that page.
+   - If no: State "Page [X] is not included in the provided images."
+3. **Visual Elements:** Treat tables, graphs, and diagrams as core content. When answering from a chart, provide specific data points to support your answer.
+4. **Citations:** Every claim must end with a reference to the page number where the evidence is found. Format: [Page X].
+5. **Uncertainty:** If the text is cut off, blurry, or ambiguous, explicitly state: "The document is unclear on this point due to image quality/cropping."
+6. **Negative Constraints:** If the answer is not in the images, say "This information is not visible in the retrieved pages." Do not make up an answer.
 
-FORMAT:
-- Be direct, start with the answer
-- Reference page numbers: (Page X)
-- English only"""
+FORMATTING GUIDELINES:
+- Be direct. Start immediately with the answer (no filler phrases like "Based on the document...").
+- Use bullet points for lists or extracted data.
+- When extracting specific terms, clauses, or dollar amounts, quote them exactly as they appear.
+- Language: English only.
+
+EXAMPLES:
+User: "What is the total revenue?"
+Assistant: The total revenue is $5.2 million [Page 4].
+
+User: "What does page 2 say about liability?"
+Assistant: Page 2 is not included in the provided images.
+"""
 
 # =============================================================================
 # MASTER CONFIG
@@ -229,4 +244,3 @@ def get_config() -> Config:
 # =============================================================================
 
 os.environ["HF_HOME"] = os.getenv("HF_HOME", "/workspace/huggingface")
-os.environ["TRANSFORMERS_CACHE"] = os.getenv("TRANSFORMERS_CACHE", "/workspace/huggingface")

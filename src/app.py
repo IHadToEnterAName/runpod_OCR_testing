@@ -23,6 +23,12 @@ config = get_config()
 # Persistent index name shared across all sessions
 PERSISTENT_INDEX = "documents"
 
+# Pre-load the Byaldi (ColQwen2) model at startup before any user sessions
+print("Pre-loading Byaldi model...")
+_startup_store = get_visual_store()
+_startup_store.initialize()
+print("Byaldi model ready.")
+
 # =============================================================================
 # CHAINLIT HANDLERS
 # =============================================================================
@@ -44,9 +50,12 @@ async def start():
         page_count = 0
         doc_count = 0
 
+    # Load persisted file metadata (survives session/container restarts)
+    file_metadata = store.load_file_metadata(PERSISTENT_INDEX) if has_existing else []
+
     # Store in session
     cl.user_session.set("index_name", PERSISTENT_INDEX)
-    cl.user_session.set("files", [])
+    cl.user_session.set("files", file_metadata)
     cl.user_session.set("memory", ConversationMemory())
     cl.user_session.set("cancelled", False)
     cl.user_session.set("has_documents", has_existing)
@@ -68,7 +77,6 @@ async def start():
                 f"**Features:**\n"
                 f"- PDF, Images (PNG, JPG)\n"
                 f"- Visual page search\n"
-                f"- Grounded answers with bounding boxes\n"
                 f"- Page-aware retrieval\n\n"
                 f"Upload files or ask a question to start!"
                 f"{existing_info}"
@@ -165,8 +173,9 @@ async def on_message(message: cl.Message):
             return
 
         is_first = not has_documents
-        await process_files(message.elements, index_name, file_list, is_first_upload=is_first)
-        cl.user_session.set("has_documents", True)
+        pages = await process_files(message.elements, index_name, file_list, is_first_upload=is_first)
+        if pages and pages > 0:
+            cl.user_session.set("has_documents", True)
         return
 
     # === CHECK FOR DOCUMENTS ===
@@ -198,6 +207,5 @@ if __name__ == "__main__":
     print(f"Model: {config.models.model_name}")
     print(f"Retrieval: Byaldi ({config.byaldi.model_name})")
     print(f"Search Top-K: {config.visual_rag.search_top_k}")
-    print(f"Rerank Top-K: {config.visual_rag.rerank_top_k}")
     print(f"Grounding: {config.visual_rag.enable_grounding}")
     print("=" * 60 + "\n")

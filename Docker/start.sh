@@ -136,6 +136,40 @@ echo -e "${GREEN}NVIDIA GPU detected${NC}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1
 
 # =============================================================================
+# CONFIGURE NVIDIA DOCKER RUNTIME (must happen before any Docker commands)
+# =============================================================================
+echo ""
+echo -e "${BLUE}Configuring NVIDIA Docker runtime...${NC}"
+
+if ! docker info 2>/dev/null | grep -q "nvidia"; then
+    echo -e "${YELLOW}NVIDIA runtime not configured for Docker. Configuring now...${NC}"
+    if command -v nvidia-ctk &> /dev/null; then
+        sudo nvidia-ctk runtime configure --runtime=docker
+        sudo systemctl restart docker
+        sleep 3  # Wait for Docker daemon to stabilize
+        echo -e "${GREEN}NVIDIA runtime configured and Docker restarted${NC}"
+    else
+        echo -e "${RED}nvidia-ctk not found. Install NVIDIA Container Toolkit first:${NC}"
+        echo "   sudo apt-get install -y nvidia-container-toolkit"
+        echo "   sudo nvidia-ctk runtime configure --runtime=docker"
+        echo "   sudo systemctl restart docker"
+        exit 1
+    fi
+else
+    echo -e "${GREEN}NVIDIA Docker runtime already configured${NC}"
+fi
+
+# =============================================================================
+# CREATE PERSISTENT STORAGE DIRECTORIES
+# =============================================================================
+echo ""
+echo -e "${BLUE}Ensuring persistent storage directories exist...${NC}"
+
+PERSISTENT_DIR="$PROJECT_DIR/persistent"
+mkdir -p "$PERSISTENT_DIR"/{redis,indexes,huggingface,uploads,data}
+echo -e "${GREEN}Persistent storage ready: $PERSISTENT_DIR${NC}"
+
+# =============================================================================
 # START vLLM SERVER
 # =============================================================================
 if [ "$START_VLLM" = true ]; then
@@ -209,29 +243,6 @@ if [ "$START_VLLM" = true ]; then
             exit 1
         fi
     fi
-fi
-
-# =============================================================================
-# VERIFY NVIDIA DOCKER RUNTIME
-# =============================================================================
-echo ""
-echo -e "${BLUE}Checking NVIDIA Docker runtime...${NC}"
-
-if ! docker info 2>/dev/null | grep -q "nvidia"; then
-    echo -e "${YELLOW}NVIDIA runtime not configured for Docker. Configuring now...${NC}"
-    if command -v nvidia-ctk &> /dev/null; then
-        sudo nvidia-ctk runtime configure --runtime=docker
-        sudo systemctl restart docker
-        echo -e "${GREEN}NVIDIA runtime configured${NC}"
-    else
-        echo -e "${RED}nvidia-ctk not found. Install NVIDIA Container Toolkit first:${NC}"
-        echo "   sudo apt-get install -y nvidia-container-toolkit"
-        echo "   sudo nvidia-ctk runtime configure --runtime=docker"
-        echo "   sudo systemctl restart docker"
-        exit 1
-    fi
-else
-    echo -e "${GREEN}NVIDIA Docker runtime available${NC}"
 fi
 
 # =============================================================================

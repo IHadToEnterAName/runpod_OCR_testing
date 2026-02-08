@@ -1,8 +1,7 @@
 """
 Visual RAG Pipeline Module
 ============================
-Core pipeline: Byaldi search -> Qwen3-VL rerank -> grounded generation.
-Replaces text-based RAG with visual document understanding.
+Core pipeline: Byaldi search -> grounded generation via Qwen3-VL.
 """
 
 import asyncio
@@ -14,7 +13,6 @@ from openai import AsyncOpenAI
 from config.settings import get_config
 from utils.helpers import count_tokens
 from storage.visual_store import get_visual_store, PageResult
-from rag.visual_reranker import visual_rerank
 from rag.router import route_query, build_enhanced_prompt, QueryIntent
 
 # =============================================================================
@@ -187,10 +185,9 @@ async def generate_response(
 
     Pipeline:
     1. Route the query (determine search/generation parameters)
-    2. Byaldi search (top 10 pages by visual similarity)
-    3. Qwen3-VL rerank (select top 5 most relevant)
-    4. Build multi-image message
-    5. Stream response from Qwen3-VL
+    2. Byaldi search (top pages by visual similarity)
+    3. Build multi-image message
+    4. Stream response from Qwen3-VL
 
     Args:
         query: User's query
@@ -209,7 +206,6 @@ async def generate_response(
 
         # Determine search parameters from routing
         search_top_k = config.visual_rag.search_top_k
-        rerank_top_k = config.visual_rag.rerank_top_k
         temperature = routing_decision.temperature
         max_tokens = routing_decision.max_tokens
 
@@ -223,34 +219,43 @@ async def generate_response(
 
         # STEP 2: Byaldi visual search
         store = get_visual_store()
-        search_results = store.search(index_name, query, top_k=search_top_k)
 
-        if not search_results.results:
-            await msg.stream_token("No relevant pages found for your query.")
-            await msg.update()
-            return
+        # For page-specific queries, directly retrieve the requested page
+        if routing_decision.intent == QueryIntent.PAGE_SPECIFIC and routing_decision.page_filter:
+            target_page = routing_decision.page_filter
+            page_result = store.get_page_by_number(index_name, target_page)
+            if page_result:
+                pages = [page_result]
+                print(f"Direct page lookup: Page {target_page}")
+            else:
+                stats = store.get_stats(index_name)
+                total = stats['total_pages']
+                await msg.stream_token(
+                    f"Page {target_page} is not included in the provided images. "
+                    f"The document has {total} page(s)."
+                )
+                await msg.update()
+                return
+        else:
+            search_results = store.search(index_name, query, top_k=search_top_k)
 
-        print(f"Search returned {len(search_results.results)} pages")
-        for r in search_results.results[:3]:
+            if not search_results.results:
+                await msg.stream_token("No relevant pages found for your query.")
+                await msg.update()
+                return
+
+            pages = search_results.results
+
+        print(f"Search returned {len(pages)} pages")
+        for r in pages:
             print(f"  Page {r.page_number} ({r.document_name}): score={r.score:.3f}")
 
-        # STEP 3: Visual reranking with Qwen3-VL
-        reranked_pages = await visual_rerank(
-            query=query,
-            search_results=search_results.results,
-            top_k=rerank_top_k
-        )
-
-        print(f"Reranked to {len(reranked_pages)} pages")
-        for r in reranked_pages:
-            print(f"  Page {r.page_number} ({r.document_name})")
-
-        # STEP 4: Build visual messages
+        # STEP 3: Build visual messages
         system_prompt = build_enhanced_prompt(config.system_prompt, routing_decision)
 
         messages = build_visual_messages(
             query=query,
-            pages=reranked_pages,
+            pages=pages,
             memory=memory,
             system_prompt=system_prompt,
             enable_grounding=config.visual_rag.enable_grounding

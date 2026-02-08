@@ -140,12 +140,17 @@ async def process_files(
                 content=f"Error processing {fname}: {str(e)}"
             ).send()
 
-    # Summary message
-    file_names = ", ".join([f["name"] for f in file_list])
-    await cl.Message(
-        content=f"Indexed {total_pages} pages from {len(file_list)} file(s): {file_names}\n\n"
-                f"You can now ask questions about your documents."
-    ).send()
+    # Persist file metadata alongside the index
+    if total_pages > 0:
+        store.save_file_metadata(index_name, file_list)
+
+        file_names = ", ".join([f["name"] for f in file_list])
+        await cl.Message(
+            content=f"Indexed {total_pages} pages from {len(file_list)} file(s): {file_names}\n\n"
+                    f"You can now ask questions about your documents."
+        ).send()
+
+    return total_pages
 
 
 # =============================================================================

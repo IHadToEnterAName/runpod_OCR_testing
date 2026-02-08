@@ -58,13 +58,18 @@ class VisualStore:
 
         os.makedirs(self._index_base_path, exist_ok=True)
 
+    def initialize(self):
+        """Eagerly load the ColQwen2 model at startup (before any user uploads)."""
+        self._get_model()
+
     def _get_model(self):
         """Lazy-load the ColQwen2 model via Byaldi."""
         if self._model is None:
             from byaldi import RAGMultiModalModel
             print(f"Loading Byaldi model: {config.byaldi.model_name}")
             self._model = RAGMultiModalModel.from_pretrained(
-                config.byaldi.model_name
+                config.byaldi.model_name,
+                index_root=self._index_base_path
             )
             print("Byaldi model loaded successfully")
         return self._model
@@ -176,7 +181,7 @@ class VisualStore:
             doc_name = self._get_document_name(index_name, result)
 
             page_results.append(PageResult(
-                page_number=result.page_num + 1,  # Byaldi uses 0-indexed pages
+                page_number=result.page_num,  # Byaldi pages are already 1-indexed
                 document_name=doc_name,
                 score=result.score,
                 image_base64=image_base64
@@ -202,6 +207,11 @@ class VisualStore:
             shutil.rmtree(byaldi_path)
 
         self._active_indexes.pop(index_name, None)
+
+        # Force fresh model reload to clear all internal index state
+        self._model = None
+        self._get_model()
+        print("Model reloaded after index deletion")
 
     def get_stats(self, index_name: str) -> Dict[str, Any]:
         """Get statistics about an index."""
@@ -246,8 +256,12 @@ class VisualStore:
             return False
 
         try:
-            model = self._get_model()
-            model.load_index(index_name)
+            from byaldi import RAGMultiModalModel
+            print(f"Loading existing index: {index_name}")
+            self._model = RAGMultiModalModel.from_index(
+                index_path=index_name,
+                index_root=self._index_base_path
+            )
             self._active_indexes[index_name] = {
                 "documents": [],
                 "path": index_path
@@ -259,17 +273,70 @@ class VisualStore:
             return False
 
     # =========================================================================
+    # PAGE LOOKUP & FILE METADATA
+    # =========================================================================
+
+    def get_page_by_number(self, index_name: str, page_number: int) -> Optional[PageResult]:
+        """
+        Retrieve a specific page by its 1-indexed page number.
+        Searches all pages and filters for the target.
+        """
+        model = self._get_model()
+        self._ensure_index_loaded(index_name)
+
+        total = self._get_page_count(index_name)
+        if total == 0 or page_number < 1 or page_number > total:
+            return None
+
+        # Search all pages to find the specific one
+        results = model.search(".", k=total)
+
+        for result in results:
+            if result.page_num == page_number:
+                image_base64 = self._get_page_image_base64(result)
+                doc_name = self._get_document_name(index_name, result)
+                return PageResult(
+                    page_number=page_number,
+                    document_name=doc_name,
+                    score=1.0,
+                    image_base64=image_base64
+                )
+        return None
+
+    def save_file_metadata(self, index_name: str, file_list: list):
+        """Save file metadata alongside the index for persistence across sessions."""
+        import json
+        index_path = os.path.join(self._index_base_path, index_name)
+        os.makedirs(index_path, exist_ok=True)
+        meta_path = os.path.join(index_path, "file_metadata.json")
+        with open(meta_path, 'w') as f:
+            json.dump(file_list, f)
+
+    def load_file_metadata(self, index_name: str) -> list:
+        """Load file metadata from disk."""
+        import json
+        meta_path = os.path.join(self._index_base_path, index_name, "file_metadata.json")
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r') as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, IOError):
+                return []
+        return []
+
+    # =========================================================================
     # INTERNAL HELPERS
     # =========================================================================
 
     def _ensure_index_loaded(self, index_name: str):
         """Load an index from disk if not already in memory."""
-        model = self._get_model()
-
-        # Check if we need to load from disk
         index_path = os.path.join(self._index_base_path, index_name)
         if os.path.exists(index_path) and index_name not in self._active_indexes:
-            model.load_index(index_name)
+            from byaldi import RAGMultiModalModel
+            self._model = RAGMultiModalModel.from_index(
+                index_path=index_name,
+                index_root=self._index_base_path
+            )
             self._active_indexes[index_name] = {
                 "documents": [],
                 "path": index_path
