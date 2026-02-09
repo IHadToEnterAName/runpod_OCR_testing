@@ -150,7 +150,7 @@ class VisualStore:
 
         return page_count
 
-    def search(self, index_name: str, query: str, top_k: int = None) -> SearchResults:
+    def search(self, index_name: str, query: str, top_k: int = None, document_filter: str = None) -> SearchResults:
         """
         Search for relevant pages using visual similarity.
 
@@ -158,6 +158,7 @@ class VisualStore:
             index_name: Index to search
             query: Natural language query
             top_k: Number of results (defaults to config.visual_rag.search_top_k)
+            document_filter: If set, only return pages from this document (case-insensitive)
 
         Returns:
             SearchResults with page images and scores
@@ -186,6 +187,18 @@ class VisualStore:
                 score=result.score,
                 image_base64=image_base64
             ))
+
+        # Apply document filter if specified
+        if document_filter and page_results:
+            filter_lower = document_filter.lower()
+            # Exact case-insensitive match
+            filtered = [r for r in page_results if r.document_name.lower() == filter_lower]
+            # Fallback: stem match (e.g. "OIA" matches "OIA.pdf")
+            if not filtered:
+                filter_stem = filter_lower.rsplit('.', 1)[0] if '.' in filter_lower else filter_lower
+                filtered = [r for r in page_results if filter_stem in r.document_name.lower()]
+            if filtered:
+                page_results = filtered
 
         return SearchResults(
             results=page_results,
@@ -262,11 +275,14 @@ class VisualStore:
                 index_path=index_name,
                 index_root=self._index_base_path
             )
+            # Load file metadata so _get_document_name() works after restart
+            file_metadata = self.load_file_metadata(index_name)
+            doc_names = [f["name"] for f in file_metadata] if file_metadata else []
             self._active_indexes[index_name] = {
-                "documents": [],
+                "documents": doc_names,
                 "path": index_path
             }
-            print(f"Loaded existing index: {index_name}")
+            print(f"Loaded existing index: {index_name} ({len(doc_names)} documents)")
             return True
         except Exception as e:
             print(f"Failed to load index {index_name}: {e}")
@@ -303,6 +319,40 @@ class VisualStore:
                 )
         return None
 
+    def get_document_pages(self, index_name: str, document_name: str) -> List[PageResult]:
+        """
+        Retrieve ALL pages belonging to a specific document.
+        Uses a broad search and filters by document name.
+        """
+        model = self._get_model()
+        self._ensure_index_loaded(index_name)
+
+        total = self._get_page_count(index_name)
+        if total == 0:
+            return []
+
+        # Search all pages with a generic query
+        results = model.search(".", k=total)
+
+        doc_name_lower = document_name.lower()
+        doc_stem = doc_name_lower.rsplit('.', 1)[0] if '.' in doc_name_lower else doc_name_lower
+
+        matching_pages = []
+        for result in results:
+            result_doc_name = self._get_document_name(index_name, result)
+            if result_doc_name.lower() == doc_name_lower or doc_stem in result_doc_name.lower():
+                image_base64 = self._get_page_image_base64(result)
+                matching_pages.append(PageResult(
+                    page_number=result.page_num,
+                    document_name=result_doc_name,
+                    score=1.0,
+                    image_base64=image_base64
+                ))
+
+        # Sort by page number
+        matching_pages.sort(key=lambda p: p.page_number)
+        return matching_pages
+
     def save_file_metadata(self, index_name: str, file_list: list):
         """Save file metadata alongside the index for persistence across sessions."""
         import json
@@ -337,8 +387,11 @@ class VisualStore:
                 index_path=index_name,
                 index_root=self._index_base_path
             )
+            # Load file metadata so _get_document_name() works
+            file_metadata = self.load_file_metadata(index_name)
+            doc_names = [f["name"] for f in file_metadata] if file_metadata else []
             self._active_indexes[index_name] = {
-                "documents": [],
+                "documents": doc_names,
                 "path": index_path
             }
 

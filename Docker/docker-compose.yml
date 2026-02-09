@@ -103,7 +103,13 @@ services:
     dns:
       - 8.8.8.8
       - 8.8.4.4
-    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     mem_limit: 16g
     restart: unless-stopped
     networks:

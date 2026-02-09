@@ -29,6 +29,7 @@ class QueryIntent(Enum):
     DEFINITION = "definition"             # "What is X?"
     LIST_EXTRACTION = "list_extraction"   # "List all the..."
     VISUAL_CONTENT = "visual_content"     # "Describe the chart/image"
+    DOCUMENT_SPECIFIC = "document_specific"  # "What's in OIA.pdf?"
     MULTI_HOP = "multi_hop"              # Requires multiple retrievals
     GENERAL = "general"                   # Default fallback
 
@@ -64,6 +65,7 @@ class RoutingDecision:
     top_k: int = 12
     use_reranking: bool = True
     page_filter: Optional[int] = None
+    document_filter: Optional[str] = None
 
     # Generation parameters
     temperature: float = 0.3
@@ -162,6 +164,11 @@ MULTI_HOP_PATTERNS = [
     r'\bfirst\s+.+,\s+then\b',
 ]
 
+# Document-specific patterns (matches filenames with common extensions)
+DOCUMENT_PATTERNS = [
+    r'([\w\-\.]+\.(?:pdf|docx|doc|txt|png|jpg|jpeg|webp))\b',
+]
+
 
 # =============================================================================
 # QUERY ROUTER CLASS
@@ -187,6 +194,7 @@ class QueryRouter:
         self.analytical_re = [re.compile(p, re.IGNORECASE) for p in ANALYTICAL_PATTERNS]
         self.visual_re = [re.compile(p, re.IGNORECASE) for p in VISUAL_PATTERNS]
         self.multi_hop_re = [re.compile(p, re.IGNORECASE) for p in MULTI_HOP_PATTERNS]
+        self.document_re = [re.compile(p, re.IGNORECASE) for p in DOCUMENT_PATTERNS]
 
     def _check_patterns(self, query: str, patterns: List[re.Pattern]) -> Tuple[bool, Optional[re.Match]]:
         """Check if query matches any pattern."""
@@ -207,6 +215,14 @@ class QueryRouter:
                     pass
         return None
 
+    def _extract_document_name(self, query: str) -> Optional[str]:
+        """Extract a document filename from the query if present."""
+        for pattern in self.document_re:
+            match = pattern.search(query)
+            if match:
+                return match.group(1)
+        return None
+
     def classify_intent(self, query: str) -> Tuple[QueryIntent, float, str]:
         """
         Classify the query intent using pattern matching.
@@ -220,6 +236,11 @@ class QueryRouter:
         is_page, match = self._check_patterns(query, self.page_re)
         if is_page:
             return QueryIntent.PAGE_SPECIFIC, 0.95, f"Page reference detected: {match.group()}"
+
+        # Check document-specific (second highest priority)
+        doc_name = self._extract_document_name(query)
+        if doc_name:
+            return QueryIntent.DOCUMENT_SPECIFIC, 0.95, f"Document reference detected: {doc_name}"
 
         # Check visual content
         is_visual, match = self._check_patterns(query, self.visual_re)
@@ -337,6 +358,15 @@ class QueryRouter:
                 "use_reranking": True,
             }
 
+        elif intent == QueryIntent.DOCUMENT_SPECIFIC:
+            doc_name = self._extract_document_name(query)
+            return RetrievalStrategy.BROAD_RETRIEVAL, {
+                **params,
+                "top_k": 15,
+                "use_reranking": True,
+                "document_filter": doc_name,
+            }
+
         elif intent == QueryIntent.MULTI_HOP:
             return RetrievalStrategy.ITERATIVE, {
                 **params,
@@ -423,6 +453,14 @@ class QueryRouter:
                 "system_prompt_modifier": "Describe visual content in detail. Explain what the chart/figure shows and its significance.",
             }
 
+        elif intent == QueryIntent.DOCUMENT_SPECIFIC:
+            return GenerationStrategy.SUMMARY, {
+                **base_params,
+                "temperature": 0.3,
+                "max_tokens": 2048,
+                "system_prompt_modifier": "The user is asking about a specific document. Provide a comprehensive overview of the document's content based on the retrieved pages.",
+            }
+
         elif intent == QueryIntent.MULTI_HOP:
             return GenerationStrategy.STEP_BY_STEP, {
                 **base_params,
@@ -459,6 +497,7 @@ class QueryRouter:
             top_k=retrieval_params["top_k"],
             use_reranking=retrieval_params["use_reranking"],
             page_filter=retrieval_params.get("page_filter"),
+            document_filter=retrieval_params.get("document_filter"),
             temperature=generation_params["temperature"],
             max_tokens=generation_params["max_tokens"],
             system_prompt_modifier=generation_params["system_prompt_modifier"],

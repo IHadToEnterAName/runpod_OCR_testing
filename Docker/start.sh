@@ -145,14 +145,23 @@ if ! docker info 2>/dev/null | grep -q "nvidia"; then
     echo -e "${YELLOW}NVIDIA runtime not configured for Docker. Configuring now...${NC}"
     if command -v nvidia-ctk &> /dev/null; then
         sudo nvidia-ctk runtime configure --runtime=docker
-        sudo systemctl restart docker
-        sleep 3  # Wait for Docker daemon to stabilize
-        echo -e "${GREEN}NVIDIA runtime configured and Docker restarted${NC}"
+        # Restart Docker - try systemctl first (native Linux), fall back to service (WSL2)
+        if sudo systemctl restart docker 2>/dev/null; then
+            sleep 3
+            echo -e "${GREEN}NVIDIA runtime configured and Docker restarted (systemctl)${NC}"
+        elif sudo service docker restart 2>/dev/null; then
+            sleep 3
+            echo -e "${GREEN}NVIDIA runtime configured and Docker restarted (service)${NC}"
+        else
+            echo -e "${YELLOW}Could not restart Docker automatically. Please restart Docker manually.${NC}"
+            echo "   On WSL2: restart Docker Desktop or run: sudo service docker restart"
+            exit 1
+        fi
     else
         echo -e "${RED}nvidia-ctk not found. Install NVIDIA Container Toolkit first:${NC}"
         echo "   sudo apt-get install -y nvidia-container-toolkit"
         echo "   sudo nvidia-ctk runtime configure --runtime=docker"
-        echo "   sudo systemctl restart docker"
+        echo "   sudo service docker restart"
         exit 1
     fi
 else

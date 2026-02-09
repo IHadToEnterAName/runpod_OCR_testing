@@ -216,6 +216,8 @@ async def generate_response(
             search_top_k = config.routing.factual_search_k
         elif routing_decision.intent == QueryIntent.PAGE_SPECIFIC:
             search_top_k = config.routing.page_specific_search_k
+        elif routing_decision.intent == QueryIntent.DOCUMENT_SPECIFIC:
+            search_top_k = config.routing.document_specific_search_k
 
         # STEP 2: Byaldi visual search
         store = get_visual_store()
@@ -236,6 +238,32 @@ async def generate_response(
                 )
                 await msg.update()
                 return
+
+        # For document-specific queries, retrieve pages from that document
+        elif routing_decision.intent == QueryIntent.DOCUMENT_SPECIFIC and routing_decision.document_filter:
+            doc_filter = routing_decision.document_filter
+            print(f"Document-specific query: filtering to '{doc_filter}'")
+
+            doc_pages = store.get_document_pages(index_name, doc_filter)
+
+            if doc_pages:
+                # Cap at 10 pages to avoid token overflow
+                pages = doc_pages[:10]
+                print(f"Found {len(doc_pages)} pages for '{doc_filter}', using {len(pages)}")
+            else:
+                # Fallback: regular search with document filter
+                search_results = store.search(
+                    index_name, query, top_k=search_top_k, document_filter=doc_filter
+                )
+                if not search_results.results:
+                    await msg.stream_token(
+                        f"No pages found for document '{doc_filter}'. "
+                        f"Check the document name with /files."
+                    )
+                    await msg.update()
+                    return
+                pages = search_results.results
+
         else:
             search_results = store.search(index_name, query, top_k=search_top_k)
 
