@@ -247,8 +247,8 @@ async def generate_response(
             doc_pages = store.get_document_pages(index_name, doc_filter)
 
             if doc_pages:
-                # Cap at 10 pages to avoid token overflow
-                pages = doc_pages[:10]
+                # Cap at 8 pages to stay within vLLM's --limit-mm-per-prompt
+                pages = doc_pages[:8]
                 print(f"Found {len(doc_pages)} pages for '{doc_filter}', using {len(pages)}")
             else:
                 # Fallback: regular search with document filter
@@ -334,6 +334,7 @@ async def generate_response(
                     stream=True
                 )
 
+                chunk_count = 0
                 async for chunk in stream:
                     # Check for cancellation mid-stream
                     cancelled = cl.user_session.get("cancelled", False)
@@ -341,18 +342,28 @@ async def generate_response(
                         cl.user_session.set("cancelled", False)
                         break
 
-                    if chunk.choices[0].delta.content:
-                        token = chunk.choices[0].delta.content
-                        full_response += token
+                    chunk_count += 1
+                    delta = chunk.choices[0].delta
+                    content = delta.content if delta else None
+
+                    # Debug first few chunks
+                    if chunk_count <= 5:
+                        print(f"Chunk {chunk_count}: content={repr(content)}, finish_reason={chunk.choices[0].finish_reason}, role={getattr(delta, 'role', None)}")
+
+                    if content:
+                        full_response += content
                         # Stream filtered output (strips <box>...</box> tags)
-                        filtered = box_filter.feed(token)
+                        filtered = box_filter.feed(content)
                         if filtered:
                             await msg.stream_token(filtered)
 
                     if chunk.choices[0].finish_reason:
                         last_finish_reason = chunk.choices[0].finish_reason
-                        print(f"Stream finished: {last_finish_reason}")
+                        print(f"Stream finished: {last_finish_reason} (total chunks: {chunk_count})")
                         break
+
+                if chunk_count == 0:
+                    print("WARNING: Stream returned 0 chunks")
 
                 # Flush any remaining buffered text
                 remaining = box_filter.flush()

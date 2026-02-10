@@ -218,7 +218,7 @@ if [ "$START_VLLM" = true ]; then
             --port $VLLM_PORT \
             --gpu-memory-utilization $VLLM_GPU_MEMORY \
             --max-model-len $VLLM_MAX_MODEL_LEN \
-            --limit-mm-per-prompt '{"image":12}' \
+            --limit-mm-per-prompt '{"image":8}' \
             --trust-remote-code \
             --enable-prefix-caching \
             > "$LOG_DIR/vllm.log" 2>&1 &

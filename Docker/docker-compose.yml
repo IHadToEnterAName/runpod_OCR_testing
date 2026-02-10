@@ -96,6 +96,7 @@ services:
       # Persistent bind mounts (survive container rebuilds and Docker prune)
       - ../persistent/data:/workspace/data
       - ../persistent/indexes:/workspace/data/indexes
+      - ../persistent/huggingface:/workspace/huggingface
     ports:
       - "${RAG_APP_PORT:-8080}:8000"
     extra_hosts:
