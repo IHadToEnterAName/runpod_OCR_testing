@@ -148,6 +148,108 @@ vllm_inference_llama3/
 - **vLLM** installed on the host (`pip install vllm`)
 - **Hugging Face token** (set `HF_TOKEN` in `Docker/.env`)
 
+### Environment File (`Docker/.env`)
+
+Copy this template into `Docker/.env` and fill in your `HF_TOKEN`:
+
+```env
+# =============================================================================
+# SERVICE PORTS
+# =============================================================================
+REDIS_PORT=6379
+RAG_APP_PORT=8080
+VLLM_PORT=8005
+
+# =============================================================================
+# SERVICE HOSTS (Docker internal networking)
+# =============================================================================
+REDIS_HOST=redis
+
+# =============================================================================
+# vLLM ENDPOINT (Docker container to reach host)
+# =============================================================================
+VLLM_URL=http://host.docker.internal:8005/v1
+
+# =============================================================================
+# MODEL CONFIGURATION
+# =============================================================================
+VLLM_MODEL=Qwen/Qwen3-VL-8B-Instruct-FP8
+BYALDI_MODEL=vidore/colqwen2-v0.1
+
+# =============================================================================
+# vLLM SERVER SETTINGS (for host-side startup)
+# =============================================================================
+VLLM_GPU_MEMORY=0.22
+VLLM_MAX_MODEL_LEN=32768
+
+# =============================================================================
+# VISUAL RAG SETTINGS
+# =============================================================================
+SEARCH_TOP_K=3
+ENABLE_GROUNDING=true
+IMAGE_DPI=200
+
+# =============================================================================
+# CACHE SETTINGS (Redis)
+# =============================================================================
+CACHE_ENABLED=true
+QUERY_TTL=3600
+RESPONSE_TTL=1800
+
+# =============================================================================
+# ROUTING SETTINGS
+# =============================================================================
+ROUTING_ENABLED=true
+
+# =============================================================================
+# GENERATION SETTINGS
+# =============================================================================
+TEMPERATURE=0.3
+MAX_TOKENS=4096
+TOP_P=0.85
+
+# =============================================================================
+# TRAFFIC CONTROLLER SETTINGS
+# =============================================================================
+MODEL_RPM=60
+MODEL_FAILURE_THRESHOLD=5
+MODEL_RECOVERY_TIMEOUT=20.0
+MODEL_TIMEOUT=120.0
+
+# =============================================================================
+# GPU CONFIGURATION
+# =============================================================================
+CUDA_VISIBLE_DEVICES=0
+
+# =============================================================================
+# HUGGING FACE AUTHENTICATION
+# *** REQUIRED: Get your token from https://huggingface.co/settings/tokens ***
+# =============================================================================
+HF_TOKEN=<your-huggingface-token-here>
+
+# =============================================================================
+# PATHS (inside container)
+# =============================================================================
+HF_HOME=/workspace/huggingface
+BYALDI_INDEX_PATH=/workspace/data/indexes
+UPLOAD_DIR=/workspace/data/uploads
+PROCESSED_DIR=/workspace/data/processed
+
+# =============================================================================
+# PYTHON SETTINGS
+# =============================================================================
+PYTHONPATH=/workspace/src
+PYTHONDONTWRITEBYTECODE=1
+PYTHONUNBUFFERED=1
+HF_HUB_ENABLE_HF_TRANSFER=1
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+LOG_LEVEL=INFO
+DEBUG=false
+```
+
 ### Quick Start
 
 ```bash
@@ -155,7 +257,8 @@ vllm_inference_llama3/
 cd vllm_inference_llama3
 
 # 2. Configure environment
-#    Edit Docker/.env to set your HF_TOKEN, model, GPU memory, etc.
+#    Copy the .env template above into Docker/.env
+#    Set your HF_TOKEN
 
 # 3. Start everything (vLLM + Docker stack)
 cd Docker
