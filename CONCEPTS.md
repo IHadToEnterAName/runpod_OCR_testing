@@ -16,8 +16,8 @@ This document explains the core AI/ML concepts, tools, and techniques used in th
 8. [Reranking](#8-reranking)
 9. [Query Routing](#9-query-routing)
 10. [Streaming (Token-by-Token Output)](#10-streaming-token-by-token-output)
-11. [Map-Reduce Summarization](#11-map-reduce-summarization)
-12. [OCR (Optical Character Recognition)](#12-ocr-optical-character-recognition)
+11. [Auto-Continuation](#11-auto-continuation)
+12. [Visual Grounding](#12-visual-grounding)
 13. [Caching (Redis)](#13-caching-redis)
 14. [Circuit Breaker & Traffic Control](#14-circuit-breaker--traffic-control)
 15. [Tokenization](#15-tokenization)
@@ -341,74 +341,80 @@ Qwen3-VL sometimes outputs bounding box tags like `<box>(123,456),(789,012)</box
 
 ---
 
-## 11. Map-Reduce Summarization
+## 11. Auto-Continuation
 
 ### The problem
 
-The VLM can only see **8 images at a time** (vLLM hardware limit). For a 1000-page document, that's less than 1% coverage — not enough for a good summary.
-
-### The solution: Map-Reduce
-
-This is a pattern borrowed from big data (Google's MapReduce paper). The idea: break a huge task into small pieces, process each piece independently, then combine the results.
+LLMs have a `max_tokens` limit on how long their response can be. If the answer requires more tokens than the limit, the response gets **cut off mid-sentence**.
 
 ```
-MAP PHASE:
-  Pages 1-30    → Chunk 1 → "Summary of chunk 1"
-  Pages 31-60   → Chunk 2 → "Summary of chunk 2"
-  Pages 61-90   → Chunk 3 → "Summary of chunk 3"
-  ...           → ...     → ...
-  Pages 970-1000 → Chunk 34 → "Summary of chunk 34"
-
-  (Each chunk is summarized by a TEXT-ONLY vLLM call — no images needed,
-   so the 8-image limit doesn't apply)
-
-REDUCE PHASE:
-  All 34 partial summaries → Combined into one prompt → Final comprehensive summary
-  (Streamed to the user token-by-token)
+User: "Explain all the key findings in this 30-page report"
+Model: "The report covers several areas. First, revenue increased by 12%
+        due to... Second, operational costs were reduced through...
+        Third, the new product line showed promising results in—" [CUT OFF]
 ```
 
-### Why text, not images?
+### The solution (`src/rag/pipeline.py`)
 
-For summarization of large docs, we extract the **text** from PDF pages instead of sending images. This is because:
-1. We need to cover ALL pages, not just 8
-2. Text-only calls have no image limit
-3. Text extraction is good enough for summarization (you don't need to "see" a chart to summarize the document's main points)
+When the model's response is cut off (vLLM returns `finish_reason="length"`), the system **automatically continues** the generation:
 
-### When does this activate?
+```
+1. Model generates response → hits max_tokens limit → finish_reason="length"
+2. System detects the cutoff
+3. System sends: "Continue from where you left off: [last part of response]"
+4. Model continues generating → streams more tokens
+5. Repeat up to 5 times if needed
+```
 
-Only when **both** conditions are true:
-1. The query router classifies the question as **SUMMARIZATION**
-2. The document has more than **50 pages** (configurable)
+The user sees one seamless response — they don't notice the continuation boundaries.
 
-For short documents (<=50 pages) or non-summarization queries, the visual pipeline is used as normal.
+### Key details
+
+- **Max 5 continuations** by default (prevents infinite loops)
+- Continuation prompts include **only text context** (no images re-sent, saves tokens)
+- Each continuation is streamed token-by-token just like the original response
+- The final combined response is saved to conversation memory as one piece
 
 ---
 
-## 12. OCR (Optical Character Recognition)
+## 12. Visual Grounding
 
-**OCR** converts images of text into actual text characters. It's how computers "read" scanned documents.
+**Visual grounding** is the ability to point to specific regions in an image. When Qwen3-VL answers a question, it can identify *where* on the page the relevant information is located.
 
-### PyMuPDF vs pytesseract
+### How it works
 
-This project uses two text extraction methods:
-
-| Method | When used | How it works |
-|--------|-----------|-------------|
-| **PyMuPDF** (`fitz`) | First attempt for all PDFs | Reads the text layer embedded in the PDF (fast, accurate for digital PDFs) |
-| **pytesseract** | Fallback only | Uses Google's Tesseract OCR engine to recognize text from a rendered image of the page (slower, needed for scanned documents) |
-
-### When does OCR happen?
-
-Only during **long-document summarization** (map-reduce path). The flow:
+Qwen3-VL can output bounding box coordinates in its response:
 
 ```
-For each page in the PDF:
-  1. Try PyMuPDF's page.get_text()
-  2. If result has < 50 characters → page is probably scanned/image-based
-  3. Fall back to pytesseract: render page as image → OCR → extract text
+The revenue figure is $4.2B <box>(234,156),(589,198)</box>
 ```
 
-For regular Q&A, the system sends **page images** directly to Qwen3-VL — no text extraction needed.
+These coordinates use a **normalized 0-1000 scale** (not pixels), meaning `(234,156)` represents a point at roughly 23.4% from the left and 15.6% from the top of the page.
+
+### The two-part system
+
+**1. BoxTagFilter** (`src/rag/pipeline.py`) — Real-time streaming filter
+
+While tokens stream to the user, the BoxTagFilter watches for `<box>...</box>` tags and strips them out. The user sees clean text:
+```
+Raw model output:  "The revenue is $4.2B <box>(234,156),(589,198)</box>"
+What user sees:    "The revenue is $4.2B"
+```
+
+**2. Grounding module** (`src/utils/grounding.py`) — Post-processing
+
+After the response is complete, the grounding module:
+1. Parses all bounding box coordinates from the raw response
+2. Converts normalized coordinates (0-1000) to actual pixel positions
+3. Draws colored rectangles on the page images
+4. Returns annotated images the user can view
+
+### Supported coordinate formats
+
+The parser handles three formats that Qwen3-VL may produce:
+- `<box>[ymin, xmin, ymax, xmax]</box>`
+- `{"bbox_2d": [x1, y1, x2, y2]}`
+- `[[x1, y1, x2, y2]]`
 
 ---
 
@@ -500,9 +506,9 @@ Models don't work with words directly. They use **subword tokens** — common wo
 ### In this project (`src/utils/helpers.py`)
 
 We use **tiktoken** (OpenAI's tokenizer) to count tokens accurately. This is important for:
-- **Chunking text** for map-reduce: Each chunk must fit within the token budget
-- **Checking if a response hit the limit**: If the model generated exactly `max_tokens` tokens, it probably got cut off
-- **Estimating costs**: API pricing is per-token
+- **Checking if a response hit the limit**: If the model generated exactly `max_tokens` tokens, it probably got cut off (triggers auto-continuation)
+- **Estimating prompt size**: Ensuring we don't exceed the model's context window
+- **Counting conversation history**: Deciding how much prior context to include
 
 ```python
 from utils.helpers import count_tokens
@@ -588,7 +594,7 @@ response1, response2 = await asyncio.gather(task1, task2)
 
 - **`async def`**: Defines a function that can be paused and resumed
 - **`await`**: Pauses the function until the result is ready (while other code runs)
-- **`asyncio.gather()`**: Runs multiple async tasks concurrently (used in map-reduce)
+- **`asyncio.gather()`**: Runs multiple async tasks concurrently
 - **`asyncio.Semaphore`**: Limits how many tasks run concurrently
 - **`async for`**: Iterates over a stream (used for token streaming)
 
@@ -597,8 +603,8 @@ response1, response2 = await asyncio.gather(task1, task2)
 Almost everything is async because the app needs to:
 - Handle multiple users simultaneously
 - Stream tokens while other requests are processing
-- Run multiple map-reduce chunks concurrently
-- Check cache and search in parallel
+- Run cache lookups and search in parallel
+- Handle auto-continuation without blocking other users
 
 ---
 
@@ -659,31 +665,9 @@ User types: "What were the Q3 revenue figures?"
 └────────────────────────────────────────────────┘
 ```
 
-### For long-document summarization (>50 pages)
+### What about summarization?
 
-```
-User types: "Summarize this document"
-    │
-    ▼
-Router: SUMMARIZATION intent
-    │
-    ▼
-Pipeline checks: 500 pages > 50 threshold → TEXT PATH
-    │
-    ▼
-PyMuPDF extracts text from all 500 pages
-  (pytesseract OCR fallback for scanned pages)
-    │
-    ▼
-Text chunked into ~17 groups of ~3000 tokens each
-    │
-    ▼
-MAP: 3 chunks summarized concurrently × 6 batches
-  → 17 partial summaries
-    │
-    ▼
-REDUCE: All partials combined → final summary streamed to user
-```
+When the router detects a summarization query, it adjusts the retrieval strategy to use **broad retrieval** — fetching more pages (up to 8, the vLLM image limit) to give the model a wider view of the document. Combined with auto-continuation, the model can produce long, detailed summaries across multiple generation passes.
 
 ---
 
@@ -692,6 +676,8 @@ REDUCE: All partials combined → final summary streamed to user
 | Term | Meaning |
 |------|---------|
 | **Async** | Non-blocking code execution (multiple tasks share one thread) |
+| **Auto-continuation** | Automatically continuing generation when the model hits its token limit |
+| **Bounding box** | Coordinates that mark a region on an image (used for visual grounding) |
 | **Byaldi** | Python library that wraps ColQwen2 for visual document indexing |
 | **Cache** | Stored results to avoid recomputing (Redis in our case) |
 | **Circuit breaker** | Safety mechanism that stops requests to a failing service |
@@ -701,8 +687,6 @@ REDUCE: All partials combined → final summary streamed to user
 | **Embedding** | A list of numbers representing the meaning of text/images |
 | **Inference** | Running a trained model to get predictions |
 | **LLM** | Large Language Model (text AI) |
-| **Map-Reduce** | Pattern: split big task into small pieces, process each, combine results |
-| **OCR** | Optical Character Recognition (reading text from images) |
 | **RAG** | Retrieval-Augmented Generation (search + LLM) |
 | **Reranking** | Second-pass relevance scoring to improve search quality |
 | **Semaphore** | Concurrency limiter (max N things at once) |
@@ -711,5 +695,6 @@ REDUCE: All partials combined → final summary streamed to user
 | **Token** | The basic unit of text for a model (~4 characters) |
 | **TTL** | Time-to-live (how long before a cache entry expires) |
 | **Vector** | A list of numbers (used for embeddings and similarity search) |
+| **Visual grounding** | The model pointing to where on a page it found information |
 | **VLM** | Vision-Language Model (AI that understands both text and images) |
 | **vLLM** | High-performance inference server for LLMs |
