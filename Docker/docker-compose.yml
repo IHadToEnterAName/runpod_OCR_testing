@@ -74,6 +74,12 @@ services:
       - TEMPERATURE=${TEMPERATURE:-0.3}
       - MAX_TOKENS=${MAX_TOKENS:-4096}
 
+      # Long-document summarization
+      - LONGDOC_PAGE_THRESHOLD=${LONGDOC_PAGE_THRESHOLD:-50}
+      - LONGDOC_CHUNK_TOKENS=${LONGDOC_CHUNK_TOKENS:-3000}
+      - LONGDOC_MAP_CONCURRENCY=${LONGDOC_MAP_CONCURRENCY:-3}
+      - LONGDOC_OCR_FALLBACK=${LONGDOC_OCR_FALLBACK:-true}
+
       # Hugging Face authentication
       - HF_TOKEN=${HF_TOKEN:-}
 

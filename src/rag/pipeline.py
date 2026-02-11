@@ -211,6 +211,23 @@ async def generate_response(
 
         # Adjust search_top_k based on intent
         if routing_decision.intent == QueryIntent.SUMMARIZATION:
+            # Check if document is large enough for text-based map-reduce
+            store = get_visual_store()
+            stats = store.get_stats(index_name)
+            total_pages = stats['total_pages']
+
+            if total_pages > config.long_doc.page_threshold:
+                file_list = cl.user_session.get("files", [])
+                result = await generate_long_doc_summary(
+                    query=query,
+                    index_name=index_name,
+                    file_list=file_list,
+                    memory=memory,
+                    msg=msg,
+                    total_pages=total_pages,
+                )
+                return result
+
             search_top_k = config.routing.summarization_search_k
         elif routing_decision.intent == QueryIntent.FACTUAL_LOOKUP:
             search_top_k = config.routing.factual_search_k
@@ -400,5 +417,257 @@ async def generate_response(
         import traceback
         traceback.print_exc()
         await msg.stream_token(f"Error generating response: {e}")
+        await msg.update()
+        return f"Error: {e}"
+
+
+# =============================================================================
+# LONG-DOCUMENT SUMMARIZATION (Map-Reduce)
+# =============================================================================
+
+MAP_SUMMARY_PROMPT = (
+    "You are a document summarization assistant. You will be given text "
+    "extracted from a section of a document. Provide a concise summary of "
+    "the key information, main points, and important details in this section. "
+    "Be factual and preserve specific numbers, names, dates, and findings. "
+    "Do not add information not present in the text."
+)
+
+REDUCE_SUMMARY_PROMPT = (
+    "You are a document summarization assistant. You will be given multiple "
+    "partial summaries from different sections of a large document. Synthesize "
+    "them into one coherent, comprehensive summary. Organize by themes or "
+    "sections rather than just concatenating. Highlight the most important "
+    "findings, conclusions, and key details. Provide a well-structured summary "
+    "with clear sections."
+)
+
+
+async def _summarize_chunk(
+    client: AsyncOpenAI,
+    semaphore: asyncio.Semaphore,
+    chunk: dict,
+    query: str,
+    chunk_index: int,
+    total_chunks: int,
+) -> str:
+    """Map phase: Summarize a single text chunk via vLLM (text-only, no images)."""
+    messages = [
+        {"role": "system", "content": MAP_SUMMARY_PROMPT},
+        {"role": "user", "content": (
+            f"User's request: {query}\n\n"
+            f"Document section (pages {chunk['page_start']}-{chunk['page_end']}, "
+            f"chunk {chunk_index + 1} of {total_chunks}):\n\n"
+            f"{chunk['text']}"
+        )}
+    ]
+
+    async with semaphore:
+        try:
+            response = await client.chat.completions.create(
+                model=config.models.model_name,
+                messages=messages,
+                max_tokens=config.long_doc.map_max_tokens,
+                temperature=config.long_doc.temperature,
+                stream=False,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            print(f"Map phase error for chunk {chunk_index + 1}: {e}")
+            return f"[Error summarizing pages {chunk['page_start']}-{chunk['page_end']}]"
+
+
+async def generate_long_doc_summary(
+    query: str,
+    index_name: str,
+    file_list: list,
+    memory,
+    msg: cl.Message,
+    total_pages: int,
+):
+    """
+    Generate a summary of a long document using text extraction + map-reduce.
+
+    Pipeline:
+    1. Extract text from all PDF pages (PyMuPDF + optional pytesseract OCR)
+    2. Chunk text respecting page boundaries
+    3. Map: Summarize each chunk concurrently via text-only vLLM calls
+    4. Reduce: Combine partial summaries into final summary, streamed to user
+    """
+    from processing.text_extractor import extract_text_from_pdf, chunk_pages_by_tokens
+
+    try:
+        print(f"\n{'='*60}")
+        print(f"LONG-DOCUMENT SUMMARIZATION")
+        print(f"Query: {query}")
+        print(f"Total pages: {total_pages}")
+        print(f"Page threshold: {config.long_doc.page_threshold}")
+
+        # --- STEP 1: Collect PDF paths ---
+        pdf_paths = []
+        for f in file_list:
+            if f.get("type") in ("pdf", "docx", "txt") and f.get("path"):
+                pdf_paths.append((f["name"], f["path"]))
+
+        if not pdf_paths:
+            await msg.stream_token(
+                "Cannot perform long-document summarization: PDF file paths "
+                "are not available. Please re-upload your documents."
+            )
+            await msg.update()
+            return
+
+        # --- STEP 2: Extract text from all pages ---
+        await msg.stream_token("Extracting text from document...\n\n")
+
+        all_pages = []
+        for doc_name, pdf_path in pdf_paths:
+            try:
+                pages = extract_text_from_pdf(pdf_path)
+                if len(pdf_paths) > 1:
+                    pages = [(pn, f"[{doc_name}]\n{text}") for pn, text in pages]
+                all_pages.extend(pages)
+            except Exception as e:
+                print(f"Text extraction failed for {doc_name}: {e}")
+                await msg.stream_token(
+                    f"Warning: Could not extract text from {doc_name}.\n"
+                )
+
+        if not all_pages or all(
+            len(t) < config.long_doc.min_chars_per_page for _, t in all_pages
+        ):
+            await msg.stream_token(
+                "Could not extract sufficient text from the document. "
+                "This may be a scanned PDF without OCR support. "
+                "Falling back to visual summarization of the most relevant pages.\n\n"
+            )
+            await msg.update()
+            return
+
+        # --- STEP 3: Chunk pages ---
+        chunks = chunk_pages_by_tokens(all_pages)
+
+        if not chunks:
+            await msg.stream_token("No text content found to summarize.")
+            await msg.update()
+            return
+
+        print(f"Created {len(chunks)} chunks for map phase")
+
+        # --- STEP 4: Map phase ---
+        await msg.stream_token(
+            f"Summarizing {total_pages} pages in {len(chunks)} sections...\n\n"
+        )
+
+        client = _get_client()
+        semaphore = asyncio.Semaphore(config.long_doc.map_concurrency)
+
+        partial_summaries = []
+        batch_size = config.long_doc.map_concurrency
+
+        for batch_start in range(0, len(chunks), batch_size):
+            cancelled = cl.user_session.get("cancelled", False)
+            if cancelled:
+                cl.user_session.set("cancelled", False)
+                await msg.stream_token("\n\n[Summarization cancelled]")
+                await msg.update()
+                return
+
+            batch_end = min(batch_start + batch_size, len(chunks))
+            batch = chunks[batch_start:batch_end]
+
+            first_chunk = batch[0]
+            last_chunk = batch[-1]
+            await msg.stream_token(
+                f"Processing pages {first_chunk['page_start']}-"
+                f"{last_chunk['page_end']}...\n"
+            )
+
+            tasks = [
+                _summarize_chunk(
+                    client=client,
+                    semaphore=semaphore,
+                    chunk=chunk,
+                    query=query,
+                    chunk_index=batch_start + j,
+                    total_chunks=len(chunks),
+                )
+                for j, chunk in enumerate(batch)
+            ]
+
+            batch_results = await asyncio.gather(*tasks)
+            partial_summaries.extend(batch_results)
+
+        print(f"Map phase complete: {len(partial_summaries)} partial summaries")
+
+        # --- STEP 5: Reduce phase ---
+        await msg.stream_token("\nCompiling final summary...\n\n---\n\n")
+
+        combined_partials = "\n\n---\n\n".join(
+            f"Section {i+1} (pages {chunks[i]['page_start']}-"
+            f"{chunks[i]['page_end']}):\n{summary}"
+            for i, summary in enumerate(partial_summaries)
+            if summary and not summary.startswith("[Error")
+        )
+
+        reduce_messages = [
+            {"role": "system", "content": REDUCE_SUMMARY_PROMPT},
+            {"role": "user", "content": (
+                f"User's request: {query}\n\n"
+                f"The document has {total_pages} pages across "
+                f"{len(pdf_paths)} file(s).\n\n"
+                f"Here are the section summaries:\n\n{combined_partials}"
+            )}
+        ]
+
+        box_filter = BoxTagFilter()
+        full_response = ""
+
+        async with _get_semaphore():
+            stream = await client.chat.completions.create(
+                model=config.models.model_name,
+                messages=reduce_messages,
+                max_tokens=config.long_doc.reduce_max_tokens,
+                temperature=config.long_doc.temperature,
+                stream=True,
+            )
+
+            async for chunk in stream:
+                cancelled = cl.user_session.get("cancelled", False)
+                if cancelled:
+                    cl.user_session.set("cancelled", False)
+                    break
+
+                delta = chunk.choices[0].delta
+                content = delta.content if delta else None
+
+                if content:
+                    full_response += content
+                    filtered = box_filter.feed(content)
+                    if filtered:
+                        await msg.stream_token(filtered)
+
+                if chunk.choices[0].finish_reason:
+                    break
+
+            remaining = box_filter.flush()
+            if remaining:
+                await msg.stream_token(remaining)
+
+        await msg.update()
+
+        if full_response:
+            memory.add(query, strip_box_tags(full_response))
+
+        print(f"Long-document summarization complete")
+        print(f"{'='*60}\n")
+
+        return full_response
+
+    except Exception as e:
+        print(f"Long-document summarization error: {e}")
+        import traceback
+        traceback.print_exc()
+        await msg.stream_token(f"\nError during summarization: {e}")
         await msg.update()
         return f"Error: {e}"

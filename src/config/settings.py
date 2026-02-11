@@ -130,6 +130,40 @@ class RoutingConfig:
     default_temperature: float = 0.3
 
 # =============================================================================
+# LONG-DOCUMENT SUMMARIZATION CONFIGURATION
+# =============================================================================
+
+@dataclass
+class LongDocSummarizationConfig:
+    """Configuration for text-based long-document summarization (map-reduce)."""
+
+    # Documents with more pages than this use text extraction + map-reduce
+    # instead of visual summarization. Below this threshold, visual path is used.
+    page_threshold: int = int(os.getenv("LONGDOC_PAGE_THRESHOLD", "50"))
+
+    # Minimum characters per page for PyMuPDF extraction to be considered successful.
+    # Pages below this trigger pytesseract OCR fallback.
+    min_chars_per_page: int = int(os.getenv("LONGDOC_MIN_CHARS_PER_PAGE", "50"))
+
+    # Token budget per text chunk in the map phase.
+    chunk_token_limit: int = int(os.getenv("LONGDOC_CHUNK_TOKENS", "3000"))
+
+    # Max concurrent map-phase summarization requests to vLLM.
+    map_concurrency: int = int(os.getenv("LONGDOC_MAP_CONCURRENCY", "3"))
+
+    # Max tokens for each map-phase partial summary.
+    map_max_tokens: int = int(os.getenv("LONGDOC_MAP_MAX_TOKENS", "800"))
+
+    # Max tokens for the final reduce-phase summary.
+    reduce_max_tokens: int = int(os.getenv("LONGDOC_REDUCE_MAX_TOKENS", "4096"))
+
+    # Temperature for summarization (both phases).
+    temperature: float = float(os.getenv("LONGDOC_TEMPERATURE", "0.3"))
+
+    # Whether to enable pytesseract OCR fallback for scanned PDFs.
+    enable_ocr_fallback: bool = os.getenv("LONGDOC_OCR_FALLBACK", "true").lower() == "true"
+
+# =============================================================================
 # TRAFFIC CONTROLLER CONFIGURATION
 # =============================================================================
 
@@ -217,6 +251,7 @@ class Config:
     cache: CacheConfig = None
     routing: RoutingConfig = None
     traffic: TrafficConfig = None
+    long_doc: LongDocSummarizationConfig = None
 
     system_prompt: str = SYSTEM_PROMPT
 
@@ -239,6 +274,8 @@ class Config:
             self.routing = RoutingConfig()
         if self.traffic is None:
             self.traffic = TrafficConfig()
+        if self.long_doc is None:
+            self.long_doc = LongDocSummarizationConfig()
 
 # =============================================================================
 # FACTORY FUNCTION

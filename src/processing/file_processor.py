@@ -6,6 +6,7 @@ Replaces text extraction + chunking + embedding with visual indexing.
 """
 
 import os
+import shutil
 import tempfile
 from typing import List, Dict
 
@@ -53,11 +54,20 @@ async def process_files(
         await progress.update()
 
         try:
+            # Persistent PDF storage dir (for text extraction in long-doc summarization)
+            persistent_pdf_dir = os.path.join(config.byaldi.index_path, index_name, "pdfs")
+            os.makedirs(persistent_pdf_dir, exist_ok=True)
+
             if fname.lower().endswith('.pdf'):
                 # Get page count for progress reporting
                 page_count = get_pdf_page_count(fpath)
                 progress.content = f"Indexing {fname} ({page_count} pages)..."
                 await progress.update()
+
+                # Copy PDF to persistent storage for text extraction later
+                persistent_pdf_path = os.path.join(persistent_pdf_dir, fname)
+                if not os.path.exists(persistent_pdf_path):
+                    shutil.copy2(fpath, persistent_pdf_path)
 
                 # Index the PDF - Byaldi handles page screenshots internally
                 if is_first_upload and i == 0:
@@ -69,7 +79,8 @@ async def process_files(
                 file_list.append({
                     "name": fname,
                     "pages": pages,
-                    "type": "pdf"
+                    "type": "pdf",
+                    "path": persistent_pdf_path
                 })
                 print(f"Indexed PDF: {fname} ({pages} pages)")
 
@@ -97,11 +108,18 @@ async def process_files(
                     else:
                         pages = store.add_to_index(index_name, pdf_path, fname)
 
+                    # Copy converted PDF to persistent storage before unlinking
+                    persistent_pdf_path = os.path.join(
+                        persistent_pdf_dir, fname.rsplit('.', 1)[0] + '.pdf'
+                    )
+                    shutil.copy2(pdf_path, persistent_pdf_path)
+
                     total_pages += pages
                     file_list.append({
                         "name": fname,
                         "pages": pages,
-                        "type": "docx"
+                        "type": "docx",
+                        "path": persistent_pdf_path
                     })
                     print(f"Indexed DOCX (via PDF): {fname} ({pages} pages)")
                     os.unlink(pdf_path)
@@ -119,11 +137,18 @@ async def process_files(
                     else:
                         pages = store.add_to_index(index_name, pdf_path, fname)
 
+                    # Copy converted PDF to persistent storage before unlinking
+                    persistent_pdf_path = os.path.join(
+                        persistent_pdf_dir, fname.rsplit('.', 1)[0] + '.pdf'
+                    )
+                    shutil.copy2(pdf_path, persistent_pdf_path)
+
                     total_pages += pages
                     file_list.append({
                         "name": fname,
                         "pages": pages,
-                        "type": "txt"
+                        "type": "txt",
+                        "path": persistent_pdf_path
                     })
                     print(f"Indexed TXT (via PDF): {fname} ({pages} pages)")
                     os.unlink(pdf_path)

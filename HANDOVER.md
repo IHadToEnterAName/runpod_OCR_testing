@@ -12,8 +12,9 @@
 8. [Query Routing System](#8-query-routing-system)
 9. [Key Design Decisions](#9-key-design-decisions)
 10. [Infrastructure & Deployment](#10-infrastructure--deployment)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Known Limitations & Future Considerations](#12-known-limitations--future-considerations)
+11. [Long-Document Summarization](#11-long-document-summarization)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Known Limitations & Future Considerations](#13-known-limitations--future-considerations)
 
 ---
 
@@ -215,6 +216,14 @@ MODEL_RPM=60
 MODEL_FAILURE_THRESHOLD=5
 MODEL_RECOVERY_TIMEOUT=20.0
 MODEL_TIMEOUT=120.0
+
+# =============================================================================
+# LONG-DOCUMENT SUMMARIZATION
+# =============================================================================
+LONGDOC_PAGE_THRESHOLD=50
+LONGDOC_CHUNK_TOKENS=3000
+LONGDOC_MAP_CONCURRENCY=3
+LONGDOC_OCR_FALLBACK=true
 
 # =============================================================================
 # GPU CONFIGURATION
@@ -917,7 +926,65 @@ Key settings in `.chainlit/config.toml`:
 
 ---
 
-## 11. Troubleshooting
+## 11. Long-Document Summarization
+
+### The Problem
+
+The visual RAG pipeline sends page images to Qwen3-VL, but vLLM enforces a hard limit of **8 images per request** (`--limit-mm-per-prompt '{"image":8}'`). For a 1000-page document, summarizing from 8 pages means less than 1% coverage.
+
+### The Solution: Text-Based Map-Reduce
+
+For documents exceeding a configurable page threshold (default: 50 pages), a **text-based map-reduce pipeline** activates automatically. Shorter documents continue using the existing visual summarization.
+
+```
+User: "Summarize this document" (1000 pages)
+  |
+  1. Router detects SUMMARIZATION intent
+  2. Pipeline checks: total_pages > 50? → YES → text-based path
+  3. PyMuPDF extracts text from ALL 1000 pages
+     (pytesseract OCR fallback for scanned pages with < 50 chars)
+  4. Text is chunked into ~3000-token groups (respecting page boundaries)
+  5. MAP: Each chunk is summarized via a text-only vLLM call (no images)
+     (3 concurrent requests by default, with progress updates)
+  6. REDUCE: All partial summaries are combined into one final prompt
+     → streamed to the user as a coherent summary
+```
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `src/processing/text_extractor.py` | **NEW** — PyMuPDF text extraction + pytesseract OCR fallback + page-boundary-aware chunking |
+| `src/rag/pipeline.py` | Branch in `generate_response()` + new `generate_long_doc_summary()` function |
+| `src/config/settings.py` | `LongDocSummarizationConfig` dataclass |
+| `src/processing/file_processor.py` | Persists PDF files to `indexes/{index_name}/pdfs/` at upload time |
+
+### Configuration (`LongDocSummarizationConfig`)
+
+| Setting | Env Var | Default | Description |
+|---------|---------|---------|-------------|
+| `page_threshold` | `LONGDOC_PAGE_THRESHOLD` | `50` | Documents above this use text-based summarization |
+| `min_chars_per_page` | `LONGDOC_MIN_CHARS_PER_PAGE` | `50` | Below this, page is considered scanned → OCR fallback |
+| `chunk_token_limit` | `LONGDOC_CHUNK_TOKENS` | `3000` | Token budget per text chunk |
+| `map_concurrency` | `LONGDOC_MAP_CONCURRENCY` | `3` | Concurrent vLLM calls during map phase |
+| `map_max_tokens` | `LONGDOC_MAP_MAX_TOKENS` | `800` | Max tokens per partial summary |
+| `reduce_max_tokens` | `LONGDOC_REDUCE_MAX_TOKENS` | `4096` | Max tokens for the final summary |
+| `temperature` | `LONGDOC_TEMPERATURE` | `0.3` | Temperature for both phases |
+| `enable_ocr_fallback` | `LONGDOC_OCR_FALLBACK` | `true` | Enable pytesseract for scanned PDFs |
+
+### What Stays Unchanged
+
+- **All non-summarization queries** (Q&A, factual, comparison, etc.) still use the visual RAG pipeline
+- **Short-document summarization** (<=50 pages) still uses the visual path with page images
+- Byaldi indexing, ColQwen2 search, query router, cache, memory — all untouched
+
+### PDF Path Persistence
+
+For text extraction to work at query time, PDF files are copied to persistent storage during upload at `indexes/{index_name}/pdfs/`. The file metadata (`file_metadata.json`) now includes a `"path"` field pointing to this copy. Documents uploaded before this change will not have this field — the system will show a message asking to re-upload.
+
+---
+
+## 12. Troubleshooting
 
 ### NVIDIA Runtime Not Found (most common)
 
@@ -1005,7 +1072,7 @@ docker logs rag_redis
 
 ---
 
-## 12. Known Limitations & Future Considerations
+## 13. Known Limitations & Future Considerations
 
 ### Current Limitations
 

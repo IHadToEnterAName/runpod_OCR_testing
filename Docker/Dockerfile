@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \
     poppler-utils \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -74,7 +75,8 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
     PyMuPDF>=1.24.0 \
     python-docx>=1.1.0 \
-    Pillow>=10.0.0
+    Pillow>=10.0.0 \
+    pytesseract>=0.3.10
 
 # Layer 6: Web framework and API
 RUN pip install --no-cache-dir \
