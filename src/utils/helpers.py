@@ -29,6 +29,6 @@ def count_tokens(text: str) -> int:
 # =============================================================================
 
 def extract_page_numbers(text: str) -> List[int]:
-    """Extract page numbers from text like 'page 5' or 'p. 10'."""
-    pages = re.findall(r'page\s*(\d+)', text.lower())
+    """Extract page numbers from text like 'page 5', 'p. 10', or 'صفحة 5'."""
+    pages = re.findall(r'(?:page|صفحة|الصفحة|ص)\s*(\d+)', text.lower())
     return [int(p) for p in pages]

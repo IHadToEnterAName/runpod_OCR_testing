@@ -34,7 +34,7 @@ class ConversationMemory:
             self.turns.pop(0)
         
         # Track mentioned pages
-        pages = re.findall(r'page\s*(\d+)', user.lower())
+        pages = re.findall(r'(?:page|صفحة|الصفحة|ص)\s*(\d+)', user.lower())
         self.mentioned_pages.extend([int(p) for p in pages])
     
     def get_history(self, n: int = 3) -> List[Tuple[str, str]]:

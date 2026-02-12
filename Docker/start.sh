@@ -175,6 +175,10 @@ echo ""
 echo -e "${BLUE}Ensuring persistent storage directories exist...${NC}"
 
 PERSISTENT_DIR="$PROJECT_DIR/persistent"
+if [ -e "$PERSISTENT_DIR" ] && [ ! -d "$PERSISTENT_DIR" ]; then
+    echo -e "${YELLOW}Warning: $PERSISTENT_DIR exists as a file, removing it...${NC}"
+    rm -f "$PERSISTENT_DIR"
+fi
 mkdir -p "$PERSISTENT_DIR"/{redis,indexes,huggingface,uploads,data}
 echo -e "${GREEN}Persistent storage ready: $PERSISTENT_DIR${NC}"
 

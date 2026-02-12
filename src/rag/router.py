@@ -87,6 +87,10 @@ PAGE_PATTERNS = [
     r'\bp\.?\s*(\d+)\b',
     r'\bon\s+page\s*(\d+)\b',
     r'\bfrom\s+page\s*(\d+)\b',
+    # Arabic
+    r'صفحة\s*(\d+)',
+    r'الصفحة\s*(\d+)',
+    r'ص\s*(\d+)',
 ]
 
 # Summarization patterns
@@ -98,6 +102,11 @@ SUMMARY_PATTERNS = [
     r'\btl;?dr\b',
     r'\bin\s+brief\b',
     r'\bbrief(ly)?\s+(describe|explain)\b',
+    # Arabic
+    r'لخ[صّ]',
+    r'ملخص',
+    r'النقاط\s+الرئيسية',
+    r'باختصار',
 ]
 
 # Comparison patterns
@@ -109,6 +118,10 @@ COMPARISON_PATTERNS = [
     r'\bversus\b',
     r'\bhow\s+does?\s+.+\s+differ\b',
     r'\bsimilarit(y|ies)\s+(between|of)\b',
+    # Arabic
+    r'قارن',
+    r'مقارنة',
+    r'الفرق\s+بين',
 ]
 
 # Definition patterns

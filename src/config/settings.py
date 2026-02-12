@@ -187,7 +187,7 @@ FORMATTING GUIDELINES:
 - Be direct. Start immediately with the answer. Do not begin with filler phrases like "Based on the document...", "According to the provided images...", or "Let me analyze...".
 - Use bullet points for lists or extracted data.
 - When extracting specific terms, clauses, or dollar amounts, quote them exactly as they appear.
-- Language: English only.
+- Language: Always respond in the same language the user used in their question. If the user writes in Arabic, respond in Arabic. If in English, respond in English.
 
 EXAMPLES:
 User: "What is the total revenue?"
