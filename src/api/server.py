@@ -10,10 +10,19 @@ Or programmatically:
     python -m api.server
 """
 
+import os
+from dotenv import load_dotenv
+
+# Load .env so ports/hosts are available before anything else
+load_dotenv(os.path.join(os.path.dirname(__file__), '..', '..', 'Docker', '.env'))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import router
+
+API_HOST = os.getenv("API_HOST", "0.0.0.0")
+API_PORT = int(os.getenv("API_PORT", "8010"))
 
 # =============================================================================
 # APPLICATION
@@ -79,7 +88,8 @@ async def startup():
         stats = store.get_stats(API_INDEX)
         print(f"Loaded existing index: {stats['total_pages']} pages, {stats['document_count']} documents")
 
-    print("API ready — docs at /docs")
+    print(f"API ready at http://{API_HOST}:{API_PORT}")
+    print(f"Docs at http://{API_HOST}:{API_PORT}/docs")
     print("=" * 60)
 
 
@@ -91,7 +101,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         "api.server:app",
-        host="0.0.0.0",
-        port=8001,
+        host=API_HOST,
+        port=API_PORT,
         reload=True,
     )

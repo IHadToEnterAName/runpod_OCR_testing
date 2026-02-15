@@ -81,6 +81,7 @@ RUN pip install --no-cache-dir \
     chainlit>=1.1.0 \
     fastapi>=0.110.0 \
     "uvicorn[standard]>=0.29.0" \
+    python-multipart>=0.0.9 \
     openai>=1.30.0 \
     httpx>=0.27.0
 
@@ -127,10 +128,14 @@ COPY src/ /workspace/src/
 COPY .chainlit/ /workspace/.chainlit/
 COPY public/ /workspace/public/
 
+# Copy startup script
+COPY Docker/start_services.sh /workspace/start_services.sh
+RUN chmod +x /workspace/start_services.sh
+
 # Healthcheck
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/ || exit 1
 
-EXPOSE 8000
+EXPOSE 8000 8010
 
-CMD ["python", "-m", "chainlit", "run", "/workspace/src/app.py", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/workspace/start_services.sh"]

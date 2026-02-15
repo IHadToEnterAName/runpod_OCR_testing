@@ -69,6 +69,7 @@ fi
 # Default values
 VLLM_PORT=${VLLM_PORT:-8005}
 RAG_APP_PORT=${RAG_APP_PORT:-8080}
+API_PORT=${API_PORT:-8010}
 VLLM_GPU_MEMORY=${VLLM_GPU_MEMORY:-0.80}
 VLLM_MAX_MODEL_LEN=${VLLM_MAX_MODEL_LEN:-32768}
 VLLM_MODEL=${VLLM_MODEL:-QuantTrio/Qwen3-VL-32B-Instruct-AWQ}
@@ -312,6 +313,7 @@ echo -e "${NC}"
 echo ""
 echo "Services:"
 echo "  - RAG Application:   http://localhost:$RAG_APP_PORT"
+echo "  - Document API:      http://localhost:$API_PORT (docs: http://localhost:$API_PORT/docs)"
 echo "  - vLLM (Qwen3-VL):  http://localhost:$VLLM_PORT/v1"
 echo "  - Redis:             localhost:${REDIS_PORT:-6379}"
 echo ""
