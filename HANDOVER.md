@@ -8,12 +8,13 @@
 4. [Getting Started](#4-getting-started)
 5. [Configuration Reference](#5-configuration-reference)
 6. [Module-by-Module Breakdown](#6-module-by-module-breakdown)
-7. [Data Flow & Request Lifecycle](#7-data-flow--request-lifecycle)
-8. [Query Routing System](#8-query-routing-system)
-9. [Key Design Decisions](#9-key-design-decisions)
-10. [Infrastructure & Deployment](#10-infrastructure--deployment)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Known Limitations & Future Considerations](#12-known-limitations--future-considerations)
+7. [Document Chunk API](#7-document-chunk-api)
+8. [Data Flow & Request Lifecycle](#8-data-flow--request-lifecycle)
+9. [Query Routing System](#9-query-routing-system)
+10. [Key Design Decisions](#10-key-design-decisions)
+11. [Infrastructure & Deployment](#11-infrastructure--deployment)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Known Limitations & Future Considerations](#13-known-limitations--future-considerations)
 
 ---
 
@@ -38,59 +39,62 @@ Unlike traditional text-based RAG systems that extract text from documents, spli
 | **Retrieval** | Byaldi (ColQwen2 - `vidore/colqwen2-v0.1`) | Visual document indexing & similarity search |
 | **Generation** | Qwen3-VL (via vLLM) | Vision-language model that reads page images and generates answers |
 | **Web UI** | Chainlit | Chat interface with file upload, streaming responses |
+| **REST API** | FastAPI | Document Chunk API for external integrations |
 | **Caching** | Redis | Caches search results (1h) and LLM responses (30m) |
-| **Containerization** | Docker Compose | Redis + RAG App (vLLM runs on host) |
+| **Containerization** | Docker Compose | Redis + RAG App + API (vLLM runs on host) |
 
 ---
 
 ## 2. Architecture
 
 ```
-                         User (Browser)
-                        http://localhost:8080
-                              |
-                     Chainlit WebSocket
-                              |
-                     +--------v--------+
-                     |    app.py       |
-                     | (Entry Point)   |
-                     +---+----+---+----+
-                         |    |   |
-             +-----------+    |   +----------+
-             |                |              |
-    +--------v------+  +-----v-----+  +-----v--------+
-    |file_processor |  |  router   |  |   memory     |
-    |(Upload/Index) |  | (Intent)  |  |  (History)   |
-    +--------+------+  +-----+-----+  +-----+--------+
-             |               |               |
-             +-------+-------+-------+-------+
-                     |               |
-            +--------v------+  +-----v--------+
-            | visual_store  |  |   cache      |
-            | (Byaldi/      |  |  (Redis)     |
-            |  ColQwen2)    |  +--------------+
-            +--------+------+
-                     |
-            +--------v--------+
-            |   pipeline      |
-            | (Build prompt,  |
-            |  stream output) |
-            +--------+--------+
-                     |
-            +--------v--------+
-            |  vLLM Server    |
-            |  (Qwen3-VL)    |
-            |  port 8005      |
-            +-----------------+
-                     |
-            Stream tokens back
-              to user's browser
+        User (Browser)               Frontend / Other Backends
+       http://localhost:8080          http://localhost:8010
+              |                                |
+     Chainlit WebSocket                  REST API (FastAPI)
+              |                                |
+     +--------v--------+            +---------v---------+
+     |    app.py       |            |   api/server.py   |
+     | (Chainlit UI)   |            |  (Document API)   |
+     +---+----+---+----+            +---+-----+---------+
+         |    |   |                     |     |
+         |    |   +----------+     +----+     |
+         |    |              |     |          |
++--------v--+ | +-----v-----+ +---v--------+ |
+|file_proc. | | | router    | |api/routes  | |
+|(Upload)   | | | (Intent)  | |(Upload,    | |
++--------+--+ | +-----+-----+ | Get, Del) | |
+         |    |       |        +---+--------+ |
+         |    |       |            |          |
+         +----+---+---+---+-------+          |
+              |       |   |                  |
+     +--------v------+|  +-----v--------+   |
+     | visual_store  ||  |   cache      |   |
+     | (Byaldi/      ||  |  (Redis)     |   |
+     |  ColQwen2)    ||  +--------------+   |
+     +--------+------+|                     |
+              |       |                     |
+     +--------v-------v+                    |
+     |   pipeline       |                   |
+     | (Build prompt,   |                   |
+     |  stream output)  |                   |
+     +--------+---------+                   |
+              |                             |
+     +--------v--------+                    |
+     |  vLLM Server    |                    |
+     |  (Qwen3-VL)    |                    |
+     |  port 8005      |                    |
+     +-----------------+                    |
+              |                             |
+     Stream tokens back              JSON responses
+       to user's browser             to external clients
 ```
 
 ### Service Layout
 
 - **vLLM Server** runs directly on the host machine (not in Docker) for optimal GPU access
-- **Redis + RAG App** run inside Docker containers, orchestrated by Docker Compose
+- **Redis + RAG App + Document API** run inside a Docker container, orchestrated by Docker Compose
+- The container runs two processes: Chainlit (port from `RAG_APP_PORT`) and the Document Chunk API (port from `API_PORT`)
 - The RAG App container talks to vLLM via `host.docker.internal:8005`
 
 ---
@@ -103,6 +107,12 @@ vllm_inference_llama3/
 │   ├── app.py                        # Main entry point (Chainlit handlers)
 │   ├── config/
 │   │   └── settings.py               # All configuration (dataclasses + env vars)
+│   ├── api/                          # Document Chunk REST API
+│   │   ├── __init__.py               # Package init
+│   │   ├── server.py                 # FastAPI app entry point (CORS, startup)
+│   │   ├── routes.py                 # POST upload, GET chunks, DELETE document
+│   │   ├── models.py                 # Pydantic request/response schemas
+│   │   └── document_registry.py      # JSON-based document metadata store
 │   ├── rag/                          # Core RAG pipeline modules
 │   │   ├── pipeline.py               # Main generation pipeline (search → stream)
 │   │   ├── router.py                 # Query intent classification & parameter tuning
@@ -120,8 +130,9 @@ vllm_inference_llama3/
 │       └── grounding.py              # Bounding box parsing & drawing
 ├── Docker/
 │   ├── Dockerfile                    # NVIDIA CUDA 12.1 + Python 3.11
-│   ├── docker-compose.yml            # Redis + RAG App services
-│   ├── start.sh                      # Production startup script
+│   ├── docker-compose.yml            # Redis + RAG App + API services
+│   ├── start.sh                      # Production startup script (host-side)
+│   ├── start_services.sh             # Container entrypoint (runs Chainlit + API)
 │   └── .env                          # Environment variables (ports, models, etc.)
 ├── Scripts/
 │   └── requirements.txt              # Python dependencies
@@ -158,6 +169,8 @@ Copy this template into `Docker/.env` and fill in your `HF_TOKEN`:
 # =============================================================================
 REDIS_PORT=6379
 RAG_APP_PORT=8080
+API_PORT=8010
+API_HOST=0.0.0.0
 VLLM_PORT=8005
 
 # =============================================================================
@@ -266,7 +279,8 @@ chmod +x start.sh
 ./start.sh
 
 # 4. Open browser
-#    http://localhost:8080
+#    Chainlit UI:    http://localhost:8080
+#    Document API:   http://localhost:8010/docs
 ```
 
 ### Start Script Options
@@ -285,8 +299,9 @@ chmod +x start.sh
 2. Configures NVIDIA Docker runtime if needed
 3. Creates `persistent/` directories for data persistence
 4. Starts vLLM server on host (port 8005) and waits for it to load (up to 10 min)
-5. Starts Docker stack: Redis (port 6379) + RAG App (port 8080)
-6. RAG App pre-loads the ColQwen2 model at startup before accepting users
+5. Starts Docker stack: Redis (port 6379) + RAG App (port 8080) + Document API (port 8010)
+6. Inside the container, `start_services.sh` launches both the API server and Chainlit
+7. Both services pre-load the ColQwen2 model at startup before accepting requests
 
 ### Install Dependencies (Without Docker)
 
@@ -314,9 +329,13 @@ vllm serve "Qwen/Qwen3-VL-8B-Instruct-FP8" \
 # Start Redis
 redis-server
 
-# Start the app
+# Start the Chainlit UI
 cd src
 PYTHONPATH=. python -m chainlit run app.py --host 0.0.0.0 --port 8000
+
+# Start the Document Chunk API (in a separate terminal)
+cd src
+PYTHONPATH=. python -m uvicorn api.server:app --host 0.0.0.0 --port 8010
 ```
 
 ---
@@ -737,7 +756,312 @@ Qwen3-VL uses a 0-1000 normalized coordinate system: `[ymin, xmin, ymax, xmax]`.
 
 ---
 
-## 7. Data Flow & Request Lifecycle
+## 7. Document Chunk API
+
+The Document Chunk API is a standalone FastAPI backend that exposes document management functionality over REST. It allows external frontends, other backends, or any HTTP client to upload documents, retrieve relevant chunks, and delete documents — independent of the Chainlit chat UI.
+
+### 7.1 Overview
+
+| Property | Value |
+|----------|-------|
+| **Framework** | FastAPI |
+| **Default Port** | `8010` (configurable via `API_PORT` in `.env`) |
+| **Swagger Docs** | `http://localhost:8010/docs` |
+| **ReDoc** | `http://localhost:8010/redoc` |
+| **CORS** | All origins allowed (tighten in production) |
+| **Index Name** | `api_documents` (separate from the Chainlit `documents` index) |
+
+### 7.2 Endpoints
+
+#### POST `/api/documents/upload`
+
+Upload a document (PDF, TXT, Word, JSON, or image). The server splits the document into chunks (pages) and stores them, attaching metadata to each chunk.
+
+**Request:** `multipart/form-data`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `file` | file | Yes | The document file to upload |
+| `document_id` | string | No | Custom document ID (auto-generated UUID if omitted) |
+| `document_name` | string | No | Display name (defaults to filename) |
+
+**Supported file types:** `.pdf`, `.txt`, `.docx`, `.json`, `.png`, `.jpg`, `.jpeg`, `.webp`
+
+**Response:** `200 OK`
+
+```json
+{
+  "document_id": "550e8400-e29b-41d4-a716-446655440000",
+  "document_name": "report.pdf",
+  "chunk_count": 12,
+  "message": "Document uploaded and split into 12 chunk(s)."
+}
+```
+
+**Error responses:**
+
+| Status | Cause |
+|--------|-------|
+| `400` | Unsupported file type |
+| `409` | Document ID already exists |
+| `500` | Processing failure |
+
+**Example (curl):**
+
+```bash
+curl -X POST http://localhost:8010/api/documents/upload \
+  -F "file=@report.pdf" \
+  -F "document_id=my-doc-001" \
+  -F "document_name=Annual Report"
+```
+
+---
+
+#### GET `/api/documents/chunks`
+
+Retrieve document chunks based on a user query. Returns the most relevant chunks along with their metadata for search, RAG, or answering questions.
+
+**Query parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Natural language query to search for relevant content |
+| `document_id` | string | No | — | Filter results to a specific document |
+| `top_k` | int | No | `5` | Number of chunks to return (1–50) |
+
+**Response:** `200 OK`
+
+```json
+{
+  "query": "What is the total revenue?",
+  "chunks": [
+    {
+      "document_id": "my-doc-001",
+      "document_name": "Annual Report",
+      "chunk_index": 4,
+      "score": 0.847,
+      "image_base64": "iVBORw0KGgo..."
+    }
+  ],
+  "total_results": 1
+}
+```
+
+Each chunk includes:
+
+| Field | Description |
+|-------|-------------|
+| `document_id` | The ID of the document this chunk belongs to |
+| `document_name` | Human-readable document name |
+| `chunk_index` | Page number (1-indexed) within the document |
+| `score` | Visual similarity score from ColQwen2 |
+| `image_base64` | Base64-encoded PNG image of the page |
+
+**Example (curl):**
+
+```bash
+curl "http://localhost:8010/api/documents/chunks?query=total+revenue&top_k=3"
+```
+
+---
+
+#### DELETE `/api/documents/{document_id}`
+
+Delete a document and all of its related chunks. Removes the stored content and metadata so it will no longer appear in search or retrieval results.
+
+**Path parameter:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `document_id` | string | The ID of the document to delete |
+
+**Response:** `200 OK`
+
+```json
+{
+  "document_id": "my-doc-001",
+  "message": "Document 'Annual Report' and all its chunks have been deleted."
+}
+```
+
+**Error:** `404` if the document ID is not found.
+
+**What happens on delete:**
+1. The Byaldi index is rebuilt from scratch without the deleted document
+2. The document's stored file is removed from disk
+3. The document is removed from the registry
+
+**Example (curl):**
+
+```bash
+curl -X DELETE http://localhost:8010/api/documents/my-doc-001
+```
+
+---
+
+#### GET `/health`
+
+Basic health check.
+
+**Response:** `200 OK`
+
+```json
+{"status": "ok"}
+```
+
+---
+
+### 7.3 Module Breakdown
+
+#### `src/api/server.py` — FastAPI Application
+
+The FastAPI app entry point. Handles:
+- CORS middleware (all origins allowed)
+- Startup event: pre-loads the Byaldi model and loads existing API index from disk
+- Reads `API_HOST` and `API_PORT` from environment variables
+
+#### `src/api/routes.py` — Route Handlers
+
+Contains the three endpoint handlers and helper functions:
+
+| Helper | Purpose |
+|--------|---------|
+| `_get_file_type(filename)` | Determines file type from extension |
+| `_convert_text_to_pdf(text)` | Renders text to a multi-page PDF (A4, 11pt) |
+| `_convert_docx_to_pdf(path)` | DOCX → text → PDF |
+| `_convert_json_to_pdf(path)` | JSON → pretty-printed text → PDF |
+| `_convert_txt_to_pdf(path)` | TXT → PDF |
+| `_prepare_for_indexing(path, type)` | Routes to the correct converter |
+| `_rebuild_index_without(doc_id)` | Deletes and rebuilds the Byaldi index excluding one document |
+
+**Upload flow:**
+1. Validate file extension
+2. Generate or use provided `document_id`
+3. Save file to persistent storage (`{index_path}/api_uploads/{doc_id}/`)
+4. Convert to PDF if needed (DOCX, TXT, JSON)
+5. Index with Byaldi (`create_index` for first doc, `add_to_index` for subsequent)
+6. Register in the document registry
+7. Return chunk count
+
+**Delete flow:**
+1. Look up document in registry
+2. Rebuild Byaldi index from all remaining documents' stored files
+3. Remove document from registry
+4. Delete stored file from disk
+
+#### `src/api/models.py` — Pydantic Schemas
+
+| Model | Used In | Fields |
+|-------|---------|--------|
+| `UploadResponse` | POST response | `document_id`, `document_name`, `chunk_count`, `message` |
+| `ChunkMetadata` | GET response item | `document_id`, `document_name`, `chunk_index`, `score`, `image_base64` |
+| `ChunksResponse` | GET response | `query`, `chunks`, `total_results` |
+| `DeleteResponse` | DELETE response | `document_id`, `message` |
+
+#### `src/api/document_registry.py` — Document Metadata Store
+
+A JSON-based registry that tracks all uploaded documents. Stored at `{index_path}/api_registry/documents.json`.
+
+**Class: `DocumentRegistry`** (singleton via `get_document_registry()`)
+
+Each document record contains:
+
+| Field | Description |
+|-------|-------------|
+| `document_id` | Unique identifier (UUID or user-provided) |
+| `document_name` | Display name |
+| `file_path` | Path to the stored original file on disk |
+| `chunk_count` | Number of pages/chunks |
+| `byaldi_doc_id` | Byaldi's internal numeric document ID |
+| `file_type` | `pdf`, `docx`, `txt`, `json`, or `image` |
+
+**Key methods:**
+
+| Method | Description |
+|--------|-------------|
+| `add(record)` | Register a new document |
+| `get(document_id)` | Look up by ID |
+| `remove(document_id)` | Remove and persist |
+| `list_all()` | List all documents |
+| `get_all_except(document_id)` | All docs except one (used for index rebuild) |
+| `get_by_byaldi_doc_id(id)` | Reverse lookup by Byaldi's internal ID |
+| `next_byaldi_doc_id()` | Next available Byaldi doc ID |
+
+### 7.4 Frontend Integration
+
+To connect a frontend to the Document Chunk API, use the base URL `http://<server-ip>:8010`.
+
+**JavaScript example (fetch):**
+
+```javascript
+// Upload a document
+const formData = new FormData();
+formData.append('file', fileInput.files[0]);
+formData.append('document_name', 'My Report');
+
+const uploadRes = await fetch('http://localhost:8010/api/documents/upload', {
+  method: 'POST',
+  body: formData,
+});
+const { document_id, chunk_count } = await uploadRes.json();
+
+// Search for chunks
+const searchRes = await fetch(
+  `http://localhost:8010/api/documents/chunks?query=total+revenue&top_k=5`
+);
+const { chunks } = await searchRes.json();
+
+// Display a chunk's page image
+const img = document.createElement('img');
+img.src = `data:image/png;base64,${chunks[0].image_base64}`;
+
+// Delete a document
+await fetch(`http://localhost:8010/api/documents/${document_id}`, {
+  method: 'DELETE',
+});
+```
+
+**Python example (requests):**
+
+```python
+import requests
+
+# Upload
+with open("report.pdf", "rb") as f:
+    resp = requests.post(
+        "http://localhost:8010/api/documents/upload",
+        files={"file": f},
+        data={"document_name": "Annual Report"},
+    )
+doc_id = resp.json()["document_id"]
+
+# Search
+resp = requests.get(
+    "http://localhost:8010/api/documents/chunks",
+    params={"query": "total revenue", "top_k": 3},
+)
+chunks = resp.json()["chunks"]
+
+# Delete
+requests.delete(f"http://localhost:8010/api/documents/{doc_id}")
+```
+
+### 7.5 API vs Chainlit — Key Differences
+
+| Aspect | Chainlit (`app.py`) | Document API (`api/`) |
+|--------|--------------------|-----------------------|
+| **Interface** | WebSocket chat UI | REST endpoints |
+| **Index** | `documents` (shared) | `api_documents` (separate) |
+| **File storage** | Temporary (Chainlit manages) | Persistent (`api_uploads/` directory) |
+| **Conversation** | Multi-turn with memory | Stateless per-request |
+| **Response type** | Streamed tokens | JSON with base64 images |
+| **Use case** | End users chatting with documents | Programmatic access from other services |
+
+The two systems use **separate Byaldi indexes**, so documents uploaded via the API do not appear in the Chainlit chat and vice versa.
+
+---
+
+## 8. Data Flow & Request Lifecycle
 
 ### Document Upload Flow
 
@@ -798,7 +1122,7 @@ User sends a text query
 
 ---
 
-## 8. Query Routing System
+## 9. Query Routing System
 
 The router uses **regex pattern matching** (no LLM calls) to classify queries. Each intent type has associated regex patterns defined in `router.py`.
 
@@ -828,7 +1152,7 @@ The modifiers are appended to the base system prompt under a `QUERY-SPECIFIC INS
 
 ---
 
-## 9. Key Design Decisions
+## 10. Key Design Decisions
 
 ### Visual-First RAG (No Text Extraction)
 
@@ -865,7 +1189,7 @@ Qwen3-VL outputs `<box>` tags for visual grounding. These are stripped in real-t
 
 ---
 
-## 10. Infrastructure & Deployment
+## 11. Infrastructure & Deployment
 
 ### Docker Compose Services
 
@@ -917,7 +1241,7 @@ Key settings in `.chainlit/config.toml`:
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### NVIDIA Runtime Not Found (most common)
 
@@ -1005,7 +1329,7 @@ docker logs rag_redis
 
 ---
 
-## 12. Known Limitations & Future Considerations
+## 13. Known Limitations & Future Considerations
 
 ### Current Limitations
 
