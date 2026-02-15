@@ -135,20 +135,24 @@ class VisualStore:
             store_collection_with_index=config.byaldi.store_collection_with_index
         )
 
-        # Get updated page count
-        prev_count = self._active_indexes.get(index_name, {}).get("total_pages", 0)
-        page_count = self._get_page_count(index_name)
-        if page_count <= prev_count:
-            page_count = prev_count + 1  # At least 1 new page
+        # Calculate how many new pages were added
+        prev_total = self._active_indexes.get(index_name, {}).get("total_pages", 0)
+        new_total = self._get_page_count(index_name)
+        if new_total <= prev_total:
+            new_total = prev_total + 1  # At least 1 new page
+
+        new_pages = new_total - prev_total
+        if new_pages <= 0:
+            new_pages = 1
 
         # Update metadata
         if index_name in self._active_indexes:
             self._active_indexes[index_name]["documents"].append(file_name)
-            self._active_indexes[index_name]["total_pages"] = page_count
+            self._active_indexes[index_name]["total_pages"] = new_total
 
-        print(f"Index {index_name} now has {page_count} pages")
+        print(f"Added {new_pages} pages from {file_name} (index total: {new_total})")
 
-        return page_count
+        return new_pages
 
     def search(self, index_name: str, query: str, top_k: int = None, document_filter: str = None) -> SearchResults:
         """
