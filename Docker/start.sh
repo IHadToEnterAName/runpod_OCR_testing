@@ -190,13 +190,14 @@ if [ "$START_VLLM" = true ]; then
     echo ""
     echo -e "${BLUE}Starting vLLM server...${NC}"
 
-    # Set cache paths and HF authentication
-    export HF_HOME="$HOME/.cache/huggingface"
-    export VLLM_CACHE_ROOT="$HOME/.cache/vllm"
+    # Set cache paths - use persistent storage so models survive restarts
+    # and are shared between host vLLM and Docker container
+    export HF_HOME="$PERSISTENT_DIR/huggingface"
+    export VLLM_CACHE_ROOT="$PERSISTENT_DIR/vllm_cache"
     export VLLM_USE_V1=0
     export HF_TOKEN="${HF_TOKEN:-}"
     unset TRANSFORMERS_CACHE
-    mkdir -p "$HF_HOME" "$VLLM_CACHE_ROOT"
+    mkdir -p "$HF_HOME/hub" "$VLLM_CACHE_ROOT"
 
     # Activate virtual environment if it exists
     if [ -f "$PROJECT_DIR/venv/bin/activate" ]; then

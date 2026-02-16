@@ -1,25 +1,33 @@
 """
 API Routes
 ===========
-REST endpoints for document management.
+REST endpoints for document management and querying.
 
 POST   /api/documents/upload          - Upload and chunk a document
 GET    /api/documents/chunks          - Retrieve relevant chunks by query
+POST   /api/documents/query           - Ask a question and get a vLLM answer
 DELETE /api/documents/{document_id}   - Delete a document and its chunks
 """
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
-from config.settings import get_config
+from config.settings import get_config, SHARED_INDEX
 from storage.visual_store import get_visual_store
-from api.models import UploadResponse, ChunksResponse, ChunkMetadata, DeleteResponse
+from api.models import (
+    UploadResponse, ChunksResponse, ChunkMetadata, DeleteResponse,
+    QueryRequest, QueryResponse, SourcePage,
+)
 from api.document_registry import get_document_registry, DocumentRecord
 
 config = get_config()
@@ -29,8 +37,7 @@ router = APIRouter(prefix="/api/documents", tags=["Documents"])
 UPLOAD_STORE = os.path.join(config.byaldi.index_path, "api_uploads")
 os.makedirs(UPLOAD_STORE, exist_ok=True)
 
-# Shared Byaldi index name for all API documents
-API_INDEX = "api_documents"
+# Byaldi index name — shared with Chainlit (defined in config.settings)
 
 # Chunked upload size (1 MB) - prevents loading entire file into memory
 UPLOAD_CHUNK_SIZE = 1024 * 1024
@@ -44,6 +51,29 @@ SUPPORTED_EXTENSIONS = {
 
 # Lock to prevent concurrent Byaldi index modifications
 _processing_lock = asyncio.Lock()
+
+
+def _reconcile_if_cleared():
+    """
+    Detect if the index was externally cleared (e.g., by Chainlit /clear)
+    and reset this process's in-memory state to match disk.
+
+    The Chainlit and API server are separate processes with separate singletons.
+    When Chainlit deletes the index, the API's model still has stale embeddings
+    in memory. This function detects that mismatch and resets.
+    """
+    registry = get_document_registry()
+    store = get_visual_store()
+
+    has_registry_docs = not registry.is_empty()
+    has_memory_index = SHARED_INDEX in store._active_indexes
+    has_disk_index = store.index_exists_on_disk(SHARED_INDEX)
+
+    if (has_registry_docs or has_memory_index) and not has_disk_index:
+        print("Detected externally cleared index — resetting API state")
+        for rec in list(registry.list_all()):
+            registry.remove(rec.document_id)
+        store.reset_state(SHARED_INDEX)
 
 
 # =============================================================================
@@ -448,6 +478,8 @@ def _index_document(stored_path: str, file_type: str, doc_id: str, doc_name: str
     Synchronous document processing: convert + index with Byaldi.
     Runs inside asyncio.to_thread() to avoid blocking the event loop.
     """
+    _reconcile_if_cleared()
+
     registry = get_document_registry()
     store = get_visual_store()
 
@@ -455,14 +487,15 @@ def _index_document(stored_path: str, file_type: str, doc_id: str, doc_name: str
     temp_file = indexable_path if indexable_path != stored_path else None
 
     try:
-        is_first = registry.is_empty()
+        # Index exists if the registry has entries OR Chainlit created it on disk
+        index_exists = not registry.is_empty() or store.index_exists_on_disk(SHARED_INDEX)
 
-        if is_first:
-            chunk_count = store.create_index(API_INDEX, indexable_path, doc_name)
+        if not index_exists:
+            chunk_count = store.create_index(SHARED_INDEX, indexable_path, doc_name)
         else:
-            if store.index_exists_on_disk(API_INDEX):
-                store.load_existing_index(API_INDEX)
-            chunk_count = store.add_to_index(API_INDEX, indexable_path, doc_name)
+            if store.index_exists_on_disk(SHARED_INDEX):
+                store.load_existing_index(SHARED_INDEX)
+            chunk_count = store.add_to_index(SHARED_INDEX, indexable_path, doc_name)
 
         # Register the document
         byaldi_doc_id = registry.next_byaldi_doc_id()
@@ -476,12 +509,17 @@ def _index_document(stored_path: str, file_type: str, doc_id: str, doc_name: str
         )
         registry.add(record)
 
-        # Update Byaldi file metadata
-        file_list = [
+        # Update Byaldi file metadata (merge with any Chainlit-uploaded docs)
+        existing_meta = store.load_file_metadata(SHARED_INDEX) or []
+        registry_names = {r.document_name for r in registry.list_all()}
+        # Keep Chainlit-only docs that aren't in the registry
+        merged = [m for m in existing_meta if m["name"] not in registry_names]
+        # Add all registry docs
+        merged.extend([
             {"name": r.document_name, "pages": r.chunk_count, "type": r.file_type}
             for r in registry.list_all()
-        ]
-        store.save_file_metadata(API_INDEX, file_list)
+        ])
+        store.save_file_metadata(SHARED_INDEX, merged)
 
         return chunk_count
 
@@ -495,16 +533,17 @@ def _search_chunks(query: str, top_k: int, doc_filter: str = None):
     Synchronous Byaldi search.
     Runs inside asyncio.to_thread() to avoid blocking the event loop.
     """
+    _reconcile_if_cleared()
     store = get_visual_store()
 
-    if not store.has_documents(API_INDEX):
-        if store.index_exists_on_disk(API_INDEX):
-            store.load_existing_index(API_INDEX)
+    if not store.has_documents(SHARED_INDEX):
+        if store.index_exists_on_disk(SHARED_INDEX):
+            store.load_existing_index(SHARED_INDEX)
         else:
             return None
 
     return store.search(
-        index_name=API_INDEX,
+        index_name=SHARED_INDEX,
         query=query,
         top_k=top_k,
         document_filter=doc_filter,
@@ -516,6 +555,7 @@ def _delete_and_rebuild(document_id: str):
     Synchronous index rebuild + file cleanup.
     Runs inside asyncio.to_thread() to avoid blocking the event loop.
     """
+    _reconcile_if_cleared()
     _rebuild_index_without(document_id)
 
 
@@ -530,7 +570,7 @@ def _rebuild_index_without(document_id: str):
     remaining = registry.get_all_except(document_id)
 
     # Delete the current index
-    store.delete_index(API_INDEX)
+    store.delete_index(SHARED_INDEX)
 
     if not remaining:
         return
@@ -546,9 +586,9 @@ def _rebuild_index_without(document_id: str):
 
         try:
             if i == 0:
-                store.create_index(API_INDEX, indexable_path, record.document_name)
+                store.create_index(SHARED_INDEX, indexable_path, record.document_name)
             else:
-                store.add_to_index(API_INDEX, indexable_path, record.document_name)
+                store.add_to_index(SHARED_INDEX, indexable_path, record.document_name)
 
             # Update the byaldi_doc_id since it changes after rebuild
             record.byaldi_doc_id = i
@@ -561,7 +601,7 @@ def _rebuild_index_without(document_id: str):
         {"name": r.document_name, "pages": r.chunk_count, "type": r.file_type}
         for r in remaining
     ]
-    store.save_file_metadata(API_INDEX, file_list)
+    store.save_file_metadata(SHARED_INDEX, file_list)
 
 
 # =============================================================================
@@ -729,3 +769,122 @@ async def delete_document(document_id: str):
         document_id=document_id,
         message=f"Document '{doc_name}' and all its chunks have been deleted."
     )
+
+
+# =============================================================================
+# SESSION MEMORY (for conversation continuity across API requests)
+# =============================================================================
+
+_SESSION_TTL = 3600  # 1 hour
+_api_sessions: dict = {}  # session_id -> (ConversationMemory, last_access_timestamp)
+
+
+def _get_or_create_session(session_id: str):
+    """Get or create a conversation memory for the given session ID."""
+    from rag.memory import ConversationMemory
+
+    now = time.time()
+    # Lazy cleanup: remove expired sessions
+    expired = [k for k, (_, ts) in _api_sessions.items() if now - ts > _SESSION_TTL]
+    for k in expired:
+        del _api_sessions[k]
+
+    if session_id not in _api_sessions:
+        _api_sessions[session_id] = (ConversationMemory(), now)
+    else:
+        mem, _ = _api_sessions[session_id]
+        _api_sessions[session_id] = (mem, now)
+
+    return _api_sessions[session_id][0]
+
+
+# =============================================================================
+# QUERY ENDPOINT
+# =============================================================================
+
+@router.post("/query")
+async def query_documents(request: QueryRequest):
+    """
+    Ask a question and get a vLLM-generated answer based on document content.
+
+    Pipeline:
+    1. Route the query (classify intent, determine search parameters)
+    2. Search the Byaldi index for relevant pages
+    3. Send pages + question to Qwen3-VL via vLLM
+    4. Return the generated answer with source citations
+
+    - **query**: Natural language question about the documents
+    - **top_k**: Number of pages to retrieve (default: 5)
+    - **document_id**: Optional filter to a specific document
+    - **session_id**: Optional session ID for conversation memory continuity
+    - **stream**: If true, returns Server-Sent Events stream instead of JSON
+    """
+    from rag.pipeline import generate_response_api, generate_response_api_stream
+
+    # Detect external clear before checking state
+    await asyncio.to_thread(_reconcile_if_cleared)
+
+    registry = get_document_registry()
+    store = get_visual_store()
+
+    if registry.is_empty() and not store.has_documents(SHARED_INDEX):
+        raise HTTPException(status_code=400, detail="No documents uploaded yet.")
+
+    # Load index if needed
+    if store.index_exists_on_disk(SHARED_INDEX) and not store.has_documents(SHARED_INDEX):
+        store.load_existing_index(SHARED_INDEX)
+
+    # Get conversation memory for this session
+    memory = None
+    if request.session_id:
+        memory = _get_or_create_session(request.session_id)
+
+    # Resolve document filter
+    doc_filter = None
+    if request.document_id:
+        record = registry.get(request.document_id)
+        if not record:
+            raise HTTPException(status_code=404, detail=f"Document '{request.document_id}' not found.")
+        doc_filter = record.document_name
+
+    try:
+        if request.stream:
+            # Streaming SSE response
+            generator, sources, intent = await generate_response_api_stream(
+                query=request.query,
+                index_name=SHARED_INDEX,
+                memory=memory,
+                document_filter=doc_filter,
+                top_k_override=request.top_k,
+            )
+
+            async def sse_stream():
+                async for token in generator:
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+                yield f"data: {json.dumps({'sources': sources, 'intent': intent})}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(sse_stream(), media_type="text/event-stream")
+
+        else:
+            # Non-streaming JSON response
+            result = await generate_response_api(
+                query=request.query,
+                index_name=SHARED_INDEX,
+                memory=memory,
+                document_filter=doc_filter,
+                top_k_override=request.top_k,
+            )
+
+            return QueryResponse(
+                query=request.query,
+                answer=result["answer"],
+                sources=[SourcePage(**s) for s in result["sources"]],
+                model=config.models.model_name,
+                intent=result["intent"],
+            )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")

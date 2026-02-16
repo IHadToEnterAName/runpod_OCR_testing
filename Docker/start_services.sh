@@ -17,7 +17,8 @@ python -m uvicorn api.server:app \
     --host ${API_HOST:-0.0.0.0} \
     --port ${API_PORT:-8010} &
 
-# Start Chainlit in the foreground (keeps container alive)
+# Start Chainlit from a writable directory (src is mounted read-only)
+cd /workspace
 python -m chainlit run /workspace/src/app.py \
     --host 0.0.0.0 \
     --port ${CHAINLIT_PORT}

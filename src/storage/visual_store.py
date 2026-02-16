@@ -216,12 +216,21 @@ class VisualStore:
 
         if os.path.exists(index_path):
             shutil.rmtree(index_path)
-            print(f"Deleted index: {index_name}")
+            print(f"Deleted index directory: {index_path}")
 
-        # Also check for .byaldi directory
-        byaldi_path = os.path.join(".byaldi", index_name)
-        if os.path.exists(byaldi_path):
-            shutil.rmtree(byaldi_path)
+        # Delete .byaldi directories at ALL known locations (Chainlit and API
+        # run with different CWDs, so .byaldi may exist in multiple places)
+        search_roots = list({
+            os.getcwd(),
+            "/workspace",
+            "/workspace/src",
+            os.path.expanduser("~"),
+        })
+        for root in search_roots:
+            byaldi_path = os.path.join(root, ".byaldi", index_name)
+            if os.path.exists(byaldi_path):
+                shutil.rmtree(byaldi_path)
+                print(f"Deleted .byaldi directory: {byaldi_path}")
 
         self._active_indexes.pop(index_name, None)
 
@@ -229,6 +238,17 @@ class VisualStore:
         self._model = None
         self._get_model()
         print("Model reloaded after index deletion")
+
+    def reset_state(self, index_name: str):
+        """Reset in-memory state for an index after external deletion.
+
+        Use this when another process (e.g., Chainlit /clear) deleted the
+        index files while this process still has stale data in memory.
+        """
+        self._active_indexes.pop(index_name, None)
+        self._model = None
+        self._get_model()
+        print(f"Reset in-memory state for index: {index_name}")
 
     def get_stats(self, index_name: str) -> Dict[str, Any]:
         """Get statistics about an index."""
@@ -253,9 +273,11 @@ class VisualStore:
         index_path = os.path.join(self._index_base_path, index_name)
         if os.path.exists(index_path) and os.listdir(index_path):
             return True
-        byaldi_path = os.path.join(".byaldi", index_name)
-        if os.path.exists(byaldi_path) and os.listdir(byaldi_path):
-            return True
+        # Check .byaldi at all known CWDs (Chainlit=/workspace, API=/workspace/src)
+        for root in {os.getcwd(), "/workspace", "/workspace/src"}:
+            byaldi_path = os.path.join(root, ".byaldi", index_name)
+            if os.path.exists(byaldi_path) and os.listdir(byaldi_path):
+                return True
         return False
 
     def load_existing_index(self, index_name: str) -> bool:

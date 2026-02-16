@@ -54,6 +54,7 @@ chroma_db/
 # Docker
 Docker/
 !Docker/Dockerfile
+!Docker/start_services.sh
 
 # Scripts (not needed in container)
 Scripts/

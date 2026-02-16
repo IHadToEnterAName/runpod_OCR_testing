@@ -402,3 +402,260 @@ async def generate_response(
         await msg.stream_token(f"Error generating response: {e}")
         await msg.update()
         return f"Error: {e}"
+
+
+# =============================================================================
+# API RESPONSE GENERATION (no Chainlit dependency)
+# =============================================================================
+
+async def _stream_vllm(messages, temperature, max_tokens, system_prompt, query, memory):
+    """Internal async generator that streams tokens from vLLM."""
+    client = _get_client()
+    semaphore = _get_semaphore()
+    full_response = ""
+    box_filter = BoxTagFilter()
+    continuation_count = 0
+    max_continuations = config.generation.max_continuations
+
+    while continuation_count <= max_continuations:
+        if continuation_count == 0:
+            current_messages = messages
+        else:
+            current_messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"You were answering: {query}"},
+                {"role": "assistant", "content": full_response},
+                {"role": "user", "content": "Please continue from where you left off. Do not repeat what you already said."}
+            ]
+
+        last_finish_reason = None
+        async with semaphore:
+            stream = await client.chat.completions.create(
+                model=config.models.model_name,
+                messages=current_messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=config.generation.top_p,
+                stream=True,
+            )
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta
+                content = delta.content if delta else None
+                if content:
+                    full_response += content
+                    filtered = box_filter.feed(content)
+                    if filtered:
+                        yield filtered
+                if chunk.choices[0].finish_reason:
+                    last_finish_reason = chunk.choices[0].finish_reason
+                    break
+
+            remaining = box_filter.flush()
+            if remaining:
+                yield remaining
+
+        if last_finish_reason == "length" and config.generation.enable_auto_continuation:
+            continuation_count += 1
+            continue
+        else:
+            break
+
+    # Save to memory if provided
+    if memory and full_response:
+        memory.add(query, strip_box_tags(full_response))
+
+
+async def generate_response_api(
+    query: str,
+    index_name: str,
+    memory=None,
+    document_filter: str = None,
+    top_k_override: int = None,
+):
+    """
+    Generate a visual RAG response without Chainlit dependencies.
+
+    Returns dict with:
+        - answer: str (full generated text)
+        - sources: list of dicts with page_number, document_name, score
+        - intent: str (routing intent classification)
+
+    Raises ValueError if no documents or no relevant pages found.
+    """
+    from rag.memory import ConversationMemory
+
+    if memory is None:
+        memory = ConversationMemory()
+
+    # STEP 1: Route the query
+    routing_decision = route_query(query)
+    print(f"\n{'='*60}")
+    print(f"[API] Query: {query}")
+    print(f"[API] Intent: {routing_decision.intent.value}")
+
+    search_top_k = top_k_override or config.visual_rag.search_top_k
+    temperature = routing_decision.temperature
+    max_tokens = routing_decision.max_tokens
+
+    if top_k_override is None:
+        if routing_decision.intent == QueryIntent.SUMMARIZATION:
+            search_top_k = config.routing.summarization_search_k
+        elif routing_decision.intent == QueryIntent.FACTUAL_LOOKUP:
+            search_top_k = config.routing.factual_search_k
+        elif routing_decision.intent == QueryIntent.PAGE_SPECIFIC:
+            search_top_k = config.routing.page_specific_search_k
+        elif routing_decision.intent == QueryIntent.DOCUMENT_SPECIFIC:
+            search_top_k = config.routing.document_specific_search_k
+
+    # STEP 2: Byaldi visual search
+    store = get_visual_store()
+
+    if routing_decision.intent == QueryIntent.PAGE_SPECIFIC and routing_decision.page_filter:
+        target_page = routing_decision.page_filter
+        page_result = store.get_page_by_number(index_name, target_page)
+        if page_result:
+            pages = [page_result]
+        else:
+            stats = store.get_stats(index_name)
+            raise ValueError(
+                f"Page {target_page} not found. The index has {stats['total_pages']} page(s)."
+            )
+
+    elif routing_decision.intent == QueryIntent.DOCUMENT_SPECIFIC and routing_decision.document_filter:
+        doc_filter = document_filter or routing_decision.document_filter
+        doc_pages = store.get_document_pages(index_name, doc_filter)
+        if doc_pages:
+            pages = doc_pages[:8]
+        else:
+            search_results = store.search(
+                index_name, query, top_k=search_top_k, document_filter=doc_filter
+            )
+            if not search_results.results:
+                raise ValueError(f"No pages found for document '{doc_filter}'.")
+            pages = search_results.results
+    else:
+        doc_filter = document_filter
+        search_results = store.search(
+            index_name, query, top_k=search_top_k, document_filter=doc_filter
+        )
+        if not search_results.results:
+            raise ValueError("No relevant pages found for your query.")
+        pages = search_results.results
+
+    print(f"[API] Search returned {len(pages)} pages")
+
+    # Build sources list
+    sources = [
+        {"page_number": p.page_number, "document_name": p.document_name, "score": p.score}
+        for p in pages
+    ]
+
+    # STEP 3: Build visual messages
+    system_prompt = build_enhanced_prompt(config.system_prompt, routing_decision)
+    messages = build_visual_messages(
+        query=query,
+        pages=pages,
+        memory=memory,
+        system_prompt=system_prompt,
+        enable_grounding=config.visual_rag.enable_grounding,
+    )
+
+    print(f"[API] Generation: temp={temperature}, max_tokens={max_tokens}")
+    print(f"{'='*60}\n")
+
+    # STEP 4: Generate (collect full response)
+    full_text = ""
+    async for token in _stream_vllm(messages, temperature, max_tokens, system_prompt, query, memory):
+        full_text += token
+
+    return {
+        "answer": strip_box_tags(full_text),
+        "sources": sources,
+        "intent": routing_decision.intent.value,
+    }
+
+
+async def generate_response_api_stream(
+    query: str,
+    index_name: str,
+    memory=None,
+    document_filter: str = None,
+    top_k_override: int = None,
+):
+    """
+    Streaming version of generate_response_api.
+
+    Returns (async_generator, sources, intent) tuple.
+    The generator yields token strings.
+    """
+    from rag.memory import ConversationMemory
+
+    if memory is None:
+        memory = ConversationMemory()
+
+    # Route + search (same as non-streaming)
+    routing_decision = route_query(query)
+    search_top_k = top_k_override or config.visual_rag.search_top_k
+    temperature = routing_decision.temperature
+    max_tokens = routing_decision.max_tokens
+
+    if top_k_override is None:
+        if routing_decision.intent == QueryIntent.SUMMARIZATION:
+            search_top_k = config.routing.summarization_search_k
+        elif routing_decision.intent == QueryIntent.FACTUAL_LOOKUP:
+            search_top_k = config.routing.factual_search_k
+        elif routing_decision.intent == QueryIntent.PAGE_SPECIFIC:
+            search_top_k = config.routing.page_specific_search_k
+        elif routing_decision.intent == QueryIntent.DOCUMENT_SPECIFIC:
+            search_top_k = config.routing.document_specific_search_k
+
+    store = get_visual_store()
+
+    if routing_decision.intent == QueryIntent.PAGE_SPECIFIC and routing_decision.page_filter:
+        target_page = routing_decision.page_filter
+        page_result = store.get_page_by_number(index_name, target_page)
+        if page_result:
+            pages = [page_result]
+        else:
+            stats = store.get_stats(index_name)
+            raise ValueError(
+                f"Page {target_page} not found. The index has {stats['total_pages']} page(s)."
+            )
+    elif routing_decision.intent == QueryIntent.DOCUMENT_SPECIFIC and routing_decision.document_filter:
+        doc_filter = document_filter or routing_decision.document_filter
+        doc_pages = store.get_document_pages(index_name, doc_filter)
+        if doc_pages:
+            pages = doc_pages[:8]
+        else:
+            search_results = store.search(
+                index_name, query, top_k=search_top_k, document_filter=doc_filter
+            )
+            if not search_results.results:
+                raise ValueError(f"No pages found for document '{doc_filter}'.")
+            pages = search_results.results
+    else:
+        doc_filter = document_filter
+        search_results = store.search(
+            index_name, query, top_k=search_top_k, document_filter=doc_filter
+        )
+        if not search_results.results:
+            raise ValueError("No relevant pages found for your query.")
+        pages = search_results.results
+
+    sources = [
+        {"page_number": p.page_number, "document_name": p.document_name, "score": p.score}
+        for p in pages
+    ]
+
+    system_prompt = build_enhanced_prompt(config.system_prompt, routing_decision)
+    messages = build_visual_messages(
+        query=query,
+        pages=pages,
+        memory=memory,
+        system_prompt=system_prompt,
+        enable_grounding=config.visual_rag.enable_grounding,
+    )
+
+    generator = _stream_vllm(messages, temperature, max_tokens, system_prompt, query, memory)
+    return generator, sources, routing_decision.intent.value

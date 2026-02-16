@@ -48,3 +48,32 @@ class DeleteResponse(BaseModel):
     """Response after deleting a document."""
     document_id: str
     message: str
+
+
+# =============================================================================
+# QUERY (vLLM)
+# =============================================================================
+
+class QueryRequest(BaseModel):
+    """Request to ask a question and get a vLLM-generated answer."""
+    query: str
+    top_k: int = 5
+    document_id: Optional[str] = None
+    session_id: Optional[str] = None
+    stream: bool = False
+
+
+class SourcePage(BaseModel):
+    """A source page used to generate the answer."""
+    page_number: int
+    document_name: str
+    score: float
+
+
+class QueryResponse(BaseModel):
+    """Non-streaming response with the full vLLM answer."""
+    query: str
+    answer: str
+    sources: List[SourcePage]
+    model: str
+    intent: str

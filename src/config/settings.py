@@ -257,4 +257,11 @@ def get_config() -> Config:
 # ENVIRONMENT SETUP
 # =============================================================================
 
+# =============================================================================
+# SHARED INDEX NAME
+# =============================================================================
+
+# Single Byaldi index used by both Chainlit UI and the REST API
+SHARED_INDEX = "documents"
+
 os.environ["HF_HOME"] = os.getenv("HF_HOME", "/workspace/huggingface")

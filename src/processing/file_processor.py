@@ -6,6 +6,7 @@ Replaces text extraction + chunking + embedding with visual indexing.
 """
 
 import os
+import shutil
 import tempfile
 from typing import List, Dict
 
@@ -16,6 +17,10 @@ from storage.visual_store import get_visual_store
 from processing.page_screenshotter import get_pdf_page_count
 
 config = get_config()
+
+# Persistent storage for Chainlit-uploaded files (needed for /delete rebuild)
+CHAINLIT_UPLOAD_STORE = os.path.join(config.byaldi.index_path, "chainlit_uploads")
+os.makedirs(CHAINLIT_UPLOAD_STORE, exist_ok=True)
 
 # =============================================================================
 # FILE PROCESSING
@@ -65,11 +70,17 @@ async def process_files(
                 else:
                     pages = store.add_to_index(index_name, fpath, fname)
 
+                # Save persistent copy for future re-indexing (/delete command)
+                stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
+                if not os.path.exists(stored_path):
+                    shutil.copy2(fpath, stored_path)
+
                 total_pages += pages
                 file_list.append({
                     "name": fname,
                     "pages": pages,
-                    "type": "pdf"
+                    "type": "pdf",
+                    "path": stored_path,
                 })
                 print(f"Indexed PDF: {fname} ({pages} pages)")
 
@@ -80,11 +91,16 @@ async def process_files(
                 else:
                     pages = store.add_to_index(index_name, fpath, fname)
 
+                stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
+                if not os.path.exists(stored_path):
+                    shutil.copy2(fpath, stored_path)
+
                 total_pages += pages
                 file_list.append({
                     "name": fname,
                     "pages": 1,
-                    "type": "image"
+                    "type": "image",
+                    "path": stored_path,
                 })
                 print(f"Indexed image: {fname}")
 
@@ -97,11 +113,17 @@ async def process_files(
                     else:
                         pages = store.add_to_index(index_name, pdf_path, fname)
 
+                    # Save original DOCX for re-indexing
+                    stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
+                    if not os.path.exists(stored_path):
+                        shutil.copy2(fpath, stored_path)
+
                     total_pages += pages
                     file_list.append({
                         "name": fname,
                         "pages": pages,
-                        "type": "docx"
+                        "type": "docx",
+                        "path": stored_path,
                     })
                     print(f"Indexed DOCX (via PDF): {fname} ({pages} pages)")
                     os.unlink(pdf_path)
@@ -119,11 +141,16 @@ async def process_files(
                     else:
                         pages = store.add_to_index(index_name, pdf_path, fname)
 
+                    stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
+                    if not os.path.exists(stored_path):
+                        shutil.copy2(fpath, stored_path)
+
                     total_pages += pages
                     file_list.append({
                         "name": fname,
                         "pages": pages,
-                        "type": "txt"
+                        "type": "txt",
+                        "path": stored_path,
                     })
                     print(f"Indexed TXT (via PDF): {fname} ({pages} pages)")
                     os.unlink(pdf_path)

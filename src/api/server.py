@@ -70,9 +70,10 @@ async def health_check():
 
 @app.on_event("startup")
 async def startup():
-    """Pre-load the Byaldi model so the first request doesn't wait."""
+    """Pre-load the Byaldi model and reconcile with Chainlit-uploaded docs."""
     from storage.visual_store import get_visual_store
-    from api.routes import API_INDEX
+    from config.settings import SHARED_INDEX
+    from api.document_registry import get_document_registry, DocumentRecord
 
     print("=" * 60)
     print("DOCUMENT CHUNK API")
@@ -82,11 +83,33 @@ async def startup():
     store.initialize()
     print("Byaldi model loaded.")
 
-    # Load existing API index if present
-    if store.index_exists_on_disk(API_INDEX):
-        store.load_existing_index(API_INDEX)
-        stats = store.get_stats(API_INDEX)
+    # Load existing shared index if present
+    if store.index_exists_on_disk(SHARED_INDEX):
+        store.load_existing_index(SHARED_INDEX)
+        stats = store.get_stats(SHARED_INDEX)
         print(f"Loaded existing index: {stats['total_pages']} pages, {stats['document_count']} documents")
+
+        # Reconcile: register any Chainlit-uploaded docs not yet in the registry
+        registry = get_document_registry()
+        file_metadata = store.load_file_metadata(SHARED_INDEX) or []
+        known_names = {r.document_name for r in registry.list_all()}
+
+        reconciled = 0
+        for i, meta in enumerate(file_metadata):
+            if meta["name"] not in known_names:
+                record = DocumentRecord(
+                    document_id=f"chainlit-{meta['name']}",
+                    document_name=meta["name"],
+                    file_path="",
+                    chunk_count=meta.get("pages", 0),
+                    byaldi_doc_id=i,
+                    file_type=meta.get("type", "unknown"),
+                )
+                registry.add(record)
+                reconciled += 1
+
+        if reconciled:
+            print(f"Reconciled {reconciled} Chainlit-uploaded document(s) into registry")
 
     print(f"API ready at http://{API_HOST}:{API_PORT}")
     print(f"Docs at http://{API_HOST}:{API_PORT}/docs")
