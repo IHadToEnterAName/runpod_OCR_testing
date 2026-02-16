@@ -33,6 +33,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \
     poppler-utils \
+    # LibreOffice headless for DOCX/Excel rendering (preserves all formatting)
+    libreoffice-core \
+    libreoffice-writer \
+    libreoffice-calc \
+    # Microsoft-compatible fonts (Calibri -> Carlito, Cambria -> Caladea)
+    fonts-crosextra-carlito \
+    fonts-crosextra-caladea \
+    fonts-liberation \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -74,6 +83,7 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
     PyMuPDF>=1.24.0 \
     python-docx>=1.1.0 \
+    openpyxl>=3.1.0 \
     Pillow>=10.0.0
 
 # Layer 6: Web framework and API
