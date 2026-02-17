@@ -644,6 +644,18 @@ async def upload_document(
             detail=f"Document with ID '{doc_id}' already exists. Delete it first or use a different ID."
         )
 
+    # Auto-replace: if a document with the same name already exists, delete it first
+    existing_by_name = [r for r in registry.list_all() if r.document_name.lower() == doc_name.lower()]
+    if existing_by_name:
+        old_rec = existing_by_name[0]
+        print(f"Replacing existing document '{old_rec.document_name}' (id={old_rec.document_id})")
+        async with _processing_lock:
+            await asyncio.to_thread(_delete_and_rebuild, old_rec.document_id)
+        registry.remove(old_rec.document_id)
+        old_dir = os.path.join(UPLOAD_STORE, old_rec.document_id)
+        if os.path.exists(old_dir):
+            shutil.rmtree(old_dir)
+
     # Save the uploaded file in chunks (no full-file memory spike)
     file_dir = os.path.join(UPLOAD_STORE, doc_id)
     os.makedirs(file_dir, exist_ok=True)

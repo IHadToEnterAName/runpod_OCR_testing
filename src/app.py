@@ -175,18 +175,18 @@ async def on_message(message: cl.Message):
         cache = get_cache()
         cache.clear_index_cache(SHARED_INDEX)
 
-        # Remove from API registry
+        # Clear ALL registry entries (byaldi_doc_ids become stale after rebuild)
         from api.document_registry import get_document_registry, DocumentRecord
         registry = get_document_registry()
         for rec in list(registry.list_all()):
-            if rec.document_name == target_name:
-                if rec.file_path and os.path.exists(rec.file_path):
-                    file_dir = os.path.dirname(rec.file_path)
-                    if os.path.exists(file_dir):
-                        shutil.rmtree(file_dir, ignore_errors=True)
-                registry.remove(rec.document_id)
+            # Delete API-uploaded file copies for the target document
+            if rec.document_name == target_name and rec.file_path and os.path.exists(rec.file_path):
+                file_dir = os.path.dirname(rec.file_path)
+                if os.path.exists(file_dir):
+                    shutil.rmtree(file_dir, ignore_errors=True)
+            registry.remove(rec.document_id)
 
-        # Delete the persistent Chainlit upload copy
+        # Delete the persistent Chainlit upload copy of the target
         chainlit_copy = os.path.join(CHAINLIT_UPLOAD_STORE, target_name)
         if os.path.exists(chainlit_copy):
             os.unlink(chainlit_copy)
@@ -222,18 +222,17 @@ async def on_message(message: cl.Message):
             remaining_files = rebuild_ok
             store.save_file_metadata(SHARED_INDEX, remaining_files)
 
-            # Re-sync registry for remaining docs
+            # Rebuild registry from scratch with correct byaldi_doc_ids
             for i, f_meta in enumerate(remaining_files):
-                if not any(r.document_name == f_meta["name"] for r in registry.list_all()):
-                    record = DocumentRecord(
-                        document_id=f"chainlit-{f_meta['name']}",
-                        document_name=f_meta["name"],
-                        file_path=f_meta.get("path", ""),
-                        chunk_count=f_meta.get("pages", 0),
-                        byaldi_doc_id=i,
-                        file_type=f_meta.get("type", "unknown"),
-                    )
-                    registry.add(record)
+                record = DocumentRecord(
+                    document_id=f"chainlit-{f_meta['name']}",
+                    document_name=f_meta["name"],
+                    file_path=f_meta.get("path", ""),
+                    chunk_count=f_meta.get("pages", 0),
+                    byaldi_doc_id=i,
+                    file_type=f_meta.get("type", "unknown"),
+                )
+                registry.add(record)
 
             cl.user_session.set("files", remaining_files)
             cl.user_session.set("has_documents", True)

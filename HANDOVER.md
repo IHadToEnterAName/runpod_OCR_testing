@@ -13,8 +13,9 @@
 9. [Query Routing System](#9-query-routing-system)
 10. [Key Design Decisions](#10-key-design-decisions)
 11. [Infrastructure & Deployment](#11-infrastructure--deployment)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Known Limitations & Future Considerations](#13-known-limitations--future-considerations)
+12. [Persistent Storage & External Disks](#12-persistent-storage--external-disks)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Known Limitations & Future Considerations](#14-known-limitations--future-considerations)
 
 ---
 
@@ -22,7 +23,7 @@
 
 ### What This Is
 
-A **Visual Retrieval-Augmented Generation (RAG)** document assistant that lets users upload documents (PDF, images, DOCX, TXT) and ask questions about them through a web chat interface.
+A **Visual Retrieval-Augmented Generation (RAG)** document assistant that lets users upload documents (PDF, images, DOCX, Excel, TXT, JSON) and ask questions about them through a web chat interface and a REST API.
 
 ### The Key Innovation
 
@@ -110,7 +111,7 @@ vllm_inference_llama3/
 │   ├── api/                          # Document Chunk REST API
 │   │   ├── __init__.py               # Package init
 │   │   ├── server.py                 # FastAPI app entry point (CORS, startup)
-│   │   ├── routes.py                 # POST upload, GET chunks, DELETE document
+│   │   ├── routes.py                 # POST upload, GET chunks, POST query, DELETE document
 │   │   ├── models.py                 # Pydantic request/response schemas
 │   │   └── document_registry.py      # JSON-based document metadata store
 │   ├── rag/                          # Core RAG pipeline modules
@@ -132,17 +133,22 @@ vllm_inference_llama3/
 │   ├── Dockerfile                    # NVIDIA CUDA 12.1 + Python 3.11
 │   ├── docker-compose.yml            # Redis + RAG App + API services
 │   ├── start.sh                      # Production startup script (host-side)
+│   ├── azure-start.sh                # Azure VM startup wrapper (sources .env, calls start.sh)
 │   ├── start_services.sh             # Container entrypoint (runs Chainlit + API)
-│   └── .env                          # Environment variables (ports, models, etc.)
+│   └── .env                          # Environment variables (ports, models, DATA_DIR, etc.)
 ├── Scripts/
 │   └── requirements.txt              # Python dependencies
 ├── .chainlit/
 │   └── config.toml                   # Chainlit UI configuration
 ├── public/                           # Static web assets (JS, CSS)
 ├── logs/                             # Runtime logs (vllm.log)
-└── persistent/                       # Docker volume mounts
+└── persistent/                       # Docker volume mounts (or DATA_DIR path)
     ├── redis/                        # Redis RDB snapshots
     ├── indexes/                      # Byaldi document indexes
+    │   └── documents/                # Shared index (SHARED_INDEX)
+    │       ├── file_metadata.json    # Document names, page counts, types
+    │       ├── chainlit_uploads/     # Persistent copies of Chainlit uploads
+    │       └── api_uploads/          # Persistent copies of API uploads
     ├── huggingface/                  # Downloaded model weights
     └── data/                         # Uploads and processed files
 ```
@@ -432,7 +438,8 @@ All configuration lives in `src/config/settings.py` as Python dataclasses. Value
 
 | Command | Action |
 |---------|--------|
-| `/clear` | Deletes the entire index, clears cache and memory |
+| `/clear` | Deletes the entire index, clears cache, memory, registry, and all upload copies |
+| `/delete <name>` | Permanently deletes a specific document (case-insensitive, partial match). Rebuilds index from remaining files |
 | `/files` | Lists all uploaded files with page counts |
 | `/stats` | Shows index stats (pages, documents) and cache memory usage |
 | `/debug` | Shows index name, page count, and document names |
@@ -448,7 +455,11 @@ All configuration lives in `src/config/settings.py` as Python dataclasses. Value
 | `cancelled` | `bool` | Flag to stop streaming |
 | `has_documents` | `bool` | Whether any documents are indexed |
 
-**Important:** All sessions share a **single persistent index** called `"documents"`. The index survives container restarts because it's stored on a Docker volume mount (`persistent/indexes/`).
+**Important:** All sessions share a **single persistent index** called `"documents"` (defined as `SHARED_INDEX` in `config/settings.py`). The index survives container restarts because it's stored on a Docker volume mount. The same index is shared with the Document Chunk API, so documents uploaded via either interface are visible to both.
+
+**Duplicate handling:** When a file with the same name is uploaded again, the old version is automatically replaced. This triggers a full index rebuild since Byaldi cannot remove individual documents.
+
+**Persistent upload copies:** All Chainlit-uploaded files are saved to `{index_path}/chainlit_uploads/` so they're available for index rebuilds during `/delete` operations.
 
 ---
 
@@ -608,7 +619,7 @@ Byaldi assigns each document a numeric `doc_id` (0, 1, 2...) in the order they w
 
 ### 6.6 `src/processing/file_processor.py` — File Upload Handler
 
-**Purpose:** Processes uploaded files and indexes them into Byaldi.
+**Purpose:** Processes uploaded files and indexes them into Byaldi. Handles duplicate detection, persistent upload storage, and format conversion.
 
 **Function: `process_files(files, index_name, file_list, is_first_upload)`**
 
@@ -619,12 +630,18 @@ Byaldi assigns each document a numeric `doc_id` (0, 1, 2...) in the order they w
 | **DOCX** | Converted to PDF via `_convert_docx_to_pdf()`, then indexed |
 | **TXT** | Rendered to PDF via `_convert_txt_to_pdf()`, then indexed |
 
+**Duplicate detection:** When a file with the same name (case-insensitive) is uploaded, the old version is removed from the file list, the index is deleted and rebuilt from remaining files, then the new version is indexed on top. This is necessary because Byaldi cannot remove individual documents from an index.
+
+**Persistent upload storage:** All uploads are saved to `CHAINLIT_UPLOAD_STORE` (`{index_path}/chainlit_uploads/`) using `shutil.copy2()`. These copies are used during `/delete` operations to rebuild the index from remaining files.
+
 **First upload vs subsequent:** The first document uses `store.create_index()` which creates a new Byaldi index. All subsequent documents use `store.add_to_index()` which appends to the existing index.
 
 **Format converters:**
 - `_convert_docx_to_pdf()` — Extracts text from DOCX paragraphs, renders to PDF
 - `_convert_txt_to_pdf()` — Reads text file, renders to PDF
 - `_text_to_pdf()` — Shared helper that renders text into a multi-page PDF using PyMuPDF with A4 dimensions, 11pt font, word wrapping at 80 chars
+- `_index_single_file()` — Routes a file to the correct indexing path based on type
+- `_detect_file_type()` — Returns file type string from filename extension
 
 ---
 
@@ -769,13 +786,13 @@ The Document Chunk API is a standalone FastAPI backend that exposes document man
 | **Swagger Docs** | `http://localhost:8010/docs` |
 | **ReDoc** | `http://localhost:8010/redoc` |
 | **CORS** | All origins allowed (tighten in production) |
-| **Index Name** | `api_documents` (separate from the Chainlit `documents` index) |
+| **Index Name** | `documents` (shared with Chainlit via `SHARED_INDEX`) |
 
 ### 7.2 Endpoints
 
 #### POST `/api/documents/upload`
 
-Upload a document (PDF, TXT, Word, JSON, or image). The server splits the document into chunks (pages) and stores them, attaching metadata to each chunk.
+Upload a document (PDF, TXT, Word, Excel, JSON, or image). The server splits the document into chunks (pages) and stores them, attaching metadata to each chunk. If a document with the same name already exists, the old version is automatically replaced.
 
 **Request:** `multipart/form-data`
 
@@ -785,7 +802,7 @@ Upload a document (PDF, TXT, Word, JSON, or image). The server splits the docume
 | `document_id` | string | No | Custom document ID (auto-generated UUID if omitted) |
 | `document_name` | string | No | Display name (defaults to filename) |
 
-**Supported file types:** `.pdf`, `.txt`, `.docx`, `.json`, `.png`, `.jpg`, `.jpeg`, `.webp`
+**Supported file types:** `.pdf`, `.txt`, `.docx`, `.xlsx`, `.xls`, `.json`, `.png`, `.jpg`, `.jpeg`, `.webp`
 
 **Response:** `200 OK`
 
@@ -899,6 +916,56 @@ curl -X DELETE http://localhost:8010/api/documents/my-doc-001
 
 ---
 
+#### POST `/api/documents/query`
+
+Ask a question about uploaded documents and get a vLLM-generated answer. The pipeline retrieves relevant pages via Byaldi, sends them as images to Qwen3-VL, and returns the generated answer with source citations.
+
+Supports both **non-streaming** (JSON response) and **streaming** (Server-Sent Events) modes.
+
+**Request body (JSON):**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Natural language question |
+| `top_k` | int | No | `5` | Number of pages to retrieve |
+| `document_id` | string | No | — | Filter to a specific document |
+| `session_id` | string | No | — | Session ID for conversation memory (1hr TTL) |
+| `stream` | boolean | No | `false` | Return SSE stream instead of JSON |
+
+**Non-streaming response:** `200 OK`
+
+```json
+{
+  "query": "What were the Q3 revenue figures?",
+  "answer": "According to the financial report on Page 4, Q3 revenue was $4.2B...",
+  "sources": [
+    {"page_number": 4, "document_name": "Annual Report", "score": 0.923}
+  ],
+  "model": "Qwen/Qwen3-VL-8B-Instruct-FP8",
+  "intent": "FACTUAL_LOOKUP"
+}
+```
+
+**Streaming response (SSE):** When `stream: true`, returns `text/event-stream`:
+
+```text
+data: {"token": "According"}
+data: {"token": " to"}
+...
+data: {"sources": [...], "intent": "FACTUAL_LOOKUP"}
+data: [DONE]
+```
+
+**Example (curl):**
+
+```bash
+curl -X POST http://localhost:8010/api/documents/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the total revenue?", "top_k": 3}'
+```
+
+---
+
 #### GET `/health`
 
 Basic health check.
@@ -917,31 +984,44 @@ Basic health check.
 
 The FastAPI app entry point. Handles:
 - CORS middleware (all origins allowed)
-- Startup event: pre-loads the Byaldi model and loads existing API index from disk
+- Startup event: pre-loads the Byaldi model, loads the shared index from disk, and **reconciles** Chainlit-uploaded documents into the API's document registry
 - Reads `API_HOST` and `API_PORT` from environment variables
+
+**Startup reconciliation:** On boot, the API reads `file_metadata.json` from the shared Byaldi index and registers any Chainlit-uploaded documents that aren't already in the document registry. This ensures documents uploaded via the Chainlit UI are immediately queryable through the API.
 
 #### `src/api/routes.py` — Route Handlers
 
-Contains the three endpoint handlers and helper functions:
+Contains four endpoint handlers (upload, chunks, query, delete) and helper functions:
 
 | Helper | Purpose |
 |--------|---------|
+| `_reconcile_if_cleared()` | Detects if the index was externally cleared (e.g., by Chainlit `/clear`) and resets the API's in-memory state to match disk |
 | `_get_file_type(filename)` | Determines file type from extension |
-| `_convert_text_to_pdf(text)` | Renders text to a multi-page PDF (A4, 11pt) |
-| `_convert_docx_to_pdf(path)` | DOCX → text → PDF |
-| `_convert_json_to_pdf(path)` | JSON → pretty-printed text → PDF |
+| `_docx_has_visuals(path)` | Checks if DOCX contains embedded images, drawings, or shapes |
+| `_excel_has_visuals(path)` | Checks if Excel file contains images or charts |
+| `_render_with_libreoffice(path)` | Renders DOCX/Excel to PDF via LibreOffice headless (used when files have visual elements) |
+| `_extract_docx_to_pdf(path)` | Extracts text + tables from DOCX in document order, renders to PDF (fast path) |
+| `_extract_excel_to_pdf(path)` | Parses Excel cell data into pipe-separated tables, renders to PDF (fast path) |
+| `_convert_text_to_pdf(text)` | Renders plain text into a multi-page PDF (A4, 11pt) |
 | `_convert_txt_to_pdf(path)` | TXT → PDF |
-| `_prepare_for_indexing(path, type)` | Routes to the correct converter |
+| `_convert_json_to_pdf(path)` | JSON → pretty-printed text → PDF |
+| `_prepare_for_indexing(path, type)` | Hybrid routing: uses fast text extraction for data-only files, LibreOffice for files with visuals |
+| `_index_document(path, type, id, name)` | Synchronous convert + index pipeline (runs in `asyncio.to_thread()`) |
+| `_search_chunks(query, top_k, filter)` | Synchronous Byaldi search (runs in `asyncio.to_thread()`) |
 | `_rebuild_index_without(doc_id)` | Deletes and rebuilds the Byaldi index excluding one document |
+| `_get_or_create_session(session_id)` | Gets or creates conversation memory for API session continuity (1hr TTL) |
+
+**Concurrency:** A `_processing_lock` (asyncio.Lock) ensures only one index modification runs at a time. All blocking GPU operations run in `asyncio.to_thread()` to avoid blocking the event loop.
 
 **Upload flow:**
 1. Validate file extension
 2. Generate or use provided `document_id`
-3. Save file to persistent storage (`{index_path}/api_uploads/{doc_id}/`)
-4. Convert to PDF if needed (DOCX, TXT, JSON)
-5. Index with Byaldi (`create_index` for first doc, `add_to_index` for subsequent)
-6. Register in the document registry
-7. Return chunk count
+3. **Auto-replace:** If a document with the same name exists, delete it first (full index rebuild)
+4. Save file to persistent storage (`{index_path}/api_uploads/{doc_id}/`)
+5. Convert to PDF if needed (hybrid: text extraction for data-only, LibreOffice for visuals)
+6. Index with Byaldi (`create_index` for first doc, `add_to_index` for subsequent)
+7. Register in the document registry and merge file metadata
+8. Return chunk count
 
 **Delete flow:**
 1. Look up document in registry
@@ -949,14 +1029,24 @@ Contains the three endpoint handlers and helper functions:
 3. Remove document from registry
 4. Delete stored file from disk
 
+**Query flow:**
+1. Reconcile with disk state (detect external clears)
+2. Route the query (classify intent, determine search parameters)
+3. Search Byaldi index for relevant pages
+4. Send pages + question to Qwen3-VL via vLLM
+5. Return answer + source citations (JSON or SSE stream)
+
 #### `src/api/models.py` — Pydantic Schemas
 
 | Model | Used In | Fields |
 |-------|---------|--------|
-| `UploadResponse` | POST response | `document_id`, `document_name`, `chunk_count`, `message` |
-| `ChunkMetadata` | GET response item | `document_id`, `document_name`, `chunk_index`, `score`, `image_base64` |
-| `ChunksResponse` | GET response | `query`, `chunks`, `total_results` |
+| `UploadResponse` | POST upload response | `document_id`, `document_name`, `chunk_count`, `message` |
+| `ChunkMetadata` | GET chunks response item | `document_id`, `document_name`, `chunk_index`, `score`, `image_base64` |
+| `ChunksResponse` | GET chunks response | `query`, `chunks`, `total_results` |
 | `DeleteResponse` | DELETE response | `document_id`, `message` |
+| `QueryRequest` | POST query request | `query`, `top_k`, `document_id`, `session_id`, `stream` |
+| `SourcePage` | POST query response item | `page_number`, `document_name`, `score` |
+| `QueryResponse` | POST query response | `query`, `answer`, `sources`, `model`, `intent` |
 
 #### `src/api/document_registry.py` — Document Metadata Store
 
@@ -1051,13 +1141,18 @@ requests.delete(f"http://localhost:8010/api/documents/{doc_id}")
 | Aspect | Chainlit (`app.py`) | Document API (`api/`) |
 |--------|--------------------|-----------------------|
 | **Interface** | WebSocket chat UI | REST endpoints |
-| **Index** | `documents` (shared) | `api_documents` (separate) |
-| **File storage** | Temporary (Chainlit manages) | Persistent (`api_uploads/` directory) |
-| **Conversation** | Multi-turn with memory | Stateless per-request |
-| **Response type** | Streamed tokens | JSON with base64 images |
+| **Index** | `documents` (shared via `SHARED_INDEX`) | `documents` (shared via `SHARED_INDEX`) |
+| **File storage** | Persistent (`chainlit_uploads/`) | Persistent (`api_uploads/` directory) |
+| **Conversation** | Multi-turn with in-session memory | Optional session memory (1hr TTL via `session_id`) |
+| **Response type** | Streamed tokens via WebSocket | JSON or SSE stream (`/query`), JSON with base64 images (`/chunks`) |
 | **Use case** | End users chatting with documents | Programmatic access from other services |
 
-The two systems use **separate Byaldi indexes**, so documents uploaded via the API do not appear in the Chainlit chat and vice versa.
+The two systems share a **single unified Byaldi index** called `"documents"` (defined as `SHARED_INDEX` in `config/settings.py`). Documents uploaded via either interface are visible to both. Cross-process reconciliation ensures consistency:
+
+- **API startup:** Reads `file_metadata.json` and registers any Chainlit-uploaded docs not yet in the registry
+- **API requests:** `_reconcile_if_cleared()` detects if Chainlit's `/clear` command deleted the index and resets stale API state
+- **Chainlit uploads:** After indexing, new files are synced to the `DocumentRegistry` so the API can see them
+- **Chainlit `/clear`:** Also clears the `DocumentRegistry` and all upload directories
 
 ---
 
@@ -1200,12 +1295,19 @@ Qwen3-VL outputs `<box>` tags for visual grounding. These are stripped in real-t
 
 ### Docker Volumes (Bind Mounts)
 
+All persistent data lives under a `persistent/` directory. The base path is controlled by the `DATA_DIR` environment variable in `Docker/.env`:
+
+- **Default (empty):** `./persistent/` relative to the project root
+- **Custom:** Set `DATA_DIR=/mnt/data/rag` (or any path) to use an external disk
+
+`start.sh` resolves: `PERSISTENT_DIR="${DATA_DIR:-$PROJECT_DIR/persistent}"`
+
 | Host Path | Container Path | Purpose |
 |-----------|---------------|---------|
-| `persistent/data` | `/workspace/data` | Uploads and processed files |
-| `persistent/indexes` | `/workspace/data/indexes` | Byaldi index files |
-| `persistent/huggingface` | `/workspace/huggingface` | Model weight cache |
-| `persistent/redis` | `/data` | Redis RDB snapshots |
+| `${PERSISTENT_DIR}/data` | `/workspace/data` | Uploads and processed files |
+| `${PERSISTENT_DIR}/indexes` | `/workspace/data/indexes` | Byaldi index files |
+| `${PERSISTENT_DIR}/huggingface` | `/workspace/huggingface` | Model weight cache |
+| `${PERSISTENT_DIR}/redis` | `/data` | Redis RDB snapshots |
 | `src/` | `/workspace/src:ro` | Source code (read-only, dev mode) |
 | `.chainlit/` | `/workspace/.chainlit:ro` | Chainlit config |
 | `public/` | `/workspace/public:ro` | Static assets |
@@ -1241,7 +1343,55 @@ Key settings in `.chainlit/config.toml`:
 
 ---
 
-## 12. Troubleshooting
+## 12. Persistent Storage & External Disks
+
+### Why External Storage?
+
+By default, all persistent data (indexes, uploads, model weights, Redis snapshots) lives in a `persistent/` directory relative to the project root. On cloud VMs with small OS disks but large attached data disks, you'll want to redirect this to the larger volume.
+
+### Configuration
+
+Set the `DATA_DIR` variable in `Docker/.env`:
+
+```env
+# Default (empty): uses ./persistent/ relative to project root.
+DATA_DIR=/mnt/data/rag
+```
+
+`start.sh` and `azure-start.sh` both resolve:
+```bash
+PERSISTENT_DIR="${DATA_DIR:-$PROJECT_DIR/persistent}"
+```
+
+The startup script creates all required subdirectories:
+```
+${DATA_DIR}/
+├── data/           # Uploads and processed files
+├── indexes/        # Byaldi document indexes
+├── huggingface/    # Downloaded model weights
+└── redis/          # Redis RDB snapshots
+```
+
+### Verifying It Works
+
+On startup, `start.sh` prints:
+```
+Persistent storage ready: /mnt/data/rag
+```
+
+If you see the default project-relative path instead, your `.env` file isn't being picked up. Make sure:
+
+1. `DATA_DIR=` is set in the correct `Docker/.env` file (the one the startup script sources)
+2. On Azure VMs, `azure-start.sh` sources `.env` before invoking `start.sh`
+3. The target path exists and has write permissions
+
+### Docker Compose Integration
+
+`docker-compose.yml` uses `${DATA_DIR:-../persistent}/` as the volume base path, so `DATA_DIR` flows through to all bind mounts automatically. No changes to `docker-compose.yml` are needed — just set the variable in `.env`.
+
+---
+
+## 13. Troubleshooting
 
 ### NVIDIA Runtime Not Found (most common)
 
@@ -1329,19 +1479,20 @@ docker logs rag_redis
 
 ---
 
-## 13. Known Limitations & Future Considerations
+## 14. Known Limitations & Future Considerations
 
 ### Current Limitations
 
-1. **No authentication** — Any visitor can access the web UI and all uploaded documents
+1. **No authentication** — Any visitor can access the web UI, API, and all uploaded documents
 2. **Single shared index** — All users share one index; no per-user isolation
-3. **In-memory conversation history** — Lost on session end or restart
+3. **In-memory conversation history** — Chainlit history lost on session end; API session memory has 1hr TTL and is in-memory only
 4. **HF_TOKEN in plaintext** — Stored in `.env` file
 5. **No text search fallback** — Pure visual search may miss keyword-based queries
 6. **8-page limit per request** — Large documents may not fit in a single query context
-7. **Cache not integrated in pipeline** — `cache.py` is defined but not called from `pipeline.py`
-8. **Traffic controller not integrated** — `traffic_controller.py` is defined but the pipeline uses its own semaphore
-9. **Visual reranker not integrated** — `visual_reranker.py` is defined but not called from the pipeline
+7. **Index rebuild on delete** — Byaldi cannot remove individual documents, so deleting one document triggers a full index rebuild from remaining files
+8. **Cache not integrated in pipeline** — `cache.py` is defined but not called from `pipeline.py`
+9. **Traffic controller not integrated** — `traffic_controller.py` is defined but the pipeline uses its own semaphore
+10. **Visual reranker not integrated** — `visual_reranker.py` is defined but not called from the pipeline
 
 ### Modules Ready for Integration
 

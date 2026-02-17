@@ -223,14 +223,16 @@ When a user asks a question, ColQwen2 also embeds the query text, then finds whi
 
 ```python
 # At upload time:
-store.create_index("session_123", "report.pdf", "report.pdf")
+store.create_index("documents", "report.pdf", "report.pdf")
 # Byaldi screenshots each page → ColQwen2 embeds them → stored in index
 
 # At query time:
-results = store.search("session_123", "Q3 earnings", top_k=3)
+results = store.search("documents", "Q3 earnings", top_k=3)
 # ColQwen2 embeds the query → finds 3 most similar page images
 # Returns: page numbers + similarity scores + base64 page images
 ```
+
+All sessions and the REST API share one index called `"documents"`, so documents uploaded through either interface are searchable everywhere.
 
 ---
 
@@ -683,13 +685,17 @@ When the router detects a summarization query, it adjusts the retrieval strategy
 | **Circuit breaker** | Safety mechanism that stops requests to a failing service |
 | **ColQwen2** | Visual embedding model that converts page images to vectors |
 | **Context window** | Maximum tokens a model can process at once |
+| **CORS** | Cross-Origin Resource Sharing — HTTP headers that let a frontend on one domain call an API on another |
 | **Docker** | Tool for packaging apps in isolated containers |
 | **Embedding** | A list of numbers representing the meaning of text/images |
 | **Inference** | Running a trained model to get predictions |
 | **LLM** | Large Language Model (text AI) |
 | **RAG** | Retrieval-Augmented Generation (search + LLM) |
+| **Reconciliation** | Syncing state between separate processes (e.g., API detecting that Chainlit cleared the index) |
 | **Reranking** | Second-pass relevance scoring to improve search quality |
+| **REST API** | HTTP interface for programmatic access (upload, search, query, delete) |
 | **Semaphore** | Concurrency limiter (max N things at once) |
+| **SSE** | Server-Sent Events — one-way streaming from server to client over HTTP (used for token streaming in the API) |
 | **Streaming** | Sending output token-by-token instead of all at once |
 | **Temperature** | Controls randomness of model output (0=deterministic, 1=creative) |
 | **Token** | The basic unit of text for a model (~4 characters) |

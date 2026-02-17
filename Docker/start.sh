@@ -175,7 +175,8 @@ fi
 echo ""
 echo -e "${BLUE}Ensuring persistent storage directories exist...${NC}"
 
-PERSISTENT_DIR="$PROJECT_DIR/persistent"
+# Use DATA_DIR from .env if set, otherwise fall back to ./persistent/
+PERSISTENT_DIR="${DATA_DIR:-$PROJECT_DIR/persistent}"
 if [ -e "$PERSISTENT_DIR" ] && [ ! -d "$PERSISTENT_DIR" ]; then
     echo -e "${YELLOW}Warning: $PERSISTENT_DIR exists as a file, removing it...${NC}"
     rm -f "$PERSISTENT_DIR"
@@ -190,8 +191,8 @@ if [ "$START_VLLM" = true ]; then
     echo ""
     echo -e "${BLUE}Starting vLLM server...${NC}"
 
-    # Set cache paths - use persistent storage so models survive restarts
-    # and are shared between host vLLM and Docker container
+    # Set cache paths - use persistent storage (DATA_DIR or ./persistent/)
+    # so models survive restarts and are shared between host vLLM and Docker
     export HF_HOME="$PERSISTENT_DIR/huggingface"
     export VLLM_CACHE_ROOT="$PERSISTENT_DIR/vllm_cache"
     export VLLM_USE_V1=0

@@ -12,7 +12,12 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-PERSISTENT_DIR="$PROJECT_DIR/persistent"
+
+# Load .env for DATA_DIR
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    source "$SCRIPT_DIR/.env"
+fi
+PERSISTENT_DIR="${DATA_DIR:-$PROJECT_DIR/persistent}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -45,7 +50,7 @@ fi
 
 # ── 2. Ensure all subdirectories exist ──
 echo -e "${YELLOW}Ensuring directory structure...${NC}"
-mkdir -p "$PERSISTENT_DIR"/{redis,indexes,huggingface/hub,uploads,data,vllm_cache}
+mkdir -p "$PERSISTENT_DIR"/{redis,indexes,huggingface/hub,uploads,data,vllm_cache,chainlit_uploads}
 echo -e "${GREEN}Directory structure OK${NC}"
 
 # ── 3. Ensure Docker is running ──

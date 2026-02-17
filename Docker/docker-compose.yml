@@ -23,7 +23,7 @@ services:
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
-      - ../persistent/redis:/data
+      - ${DATA_DIR:-../persistent}/redis:/data
     command: redis-server --save 60 1 --loglevel warning --maxmemory 2gb --maxmemory-policy allkeys-lru
     restart: unless-stopped
     networks:
@@ -98,9 +98,10 @@ services:
       - ../.chainlit:/workspace/.chainlit:ro
       - ../public:/workspace/public:ro
       # Persistent bind mounts (survive container rebuilds and Docker prune)
-      - ../persistent/data:/workspace/data
-      - ../persistent/indexes:/workspace/data/indexes
-      - ../persistent/huggingface:/workspace/huggingface
+      # Set DATA_DIR in .env to point to an external disk (e.g. /mnt/data/rag)
+      - ${DATA_DIR:-../persistent}/data:/workspace/data
+      - ${DATA_DIR:-../persistent}/indexes:/workspace/data/indexes
+      - ${DATA_DIR:-../persistent}/huggingface:/workspace/huggingface
     ports:
       - "${RAG_APP_PORT:-8080}:8000"
       - "${API_PORT:-8010}:${API_PORT:-8010}"

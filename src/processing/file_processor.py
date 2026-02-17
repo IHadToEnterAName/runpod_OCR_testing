@@ -38,6 +38,9 @@ async def process_files(
     For PDFs: Byaldi handles page screenshots and ColQwen2 embedding internally.
     For images: Indexed as single-page documents.
 
+    If a file with the same name already exists, the old version is replaced
+    (requires a full index rebuild since Byaldi can't remove individual docs).
+
     Args:
         files: Chainlit uploaded file objects
         index_name: Byaldi index name (session-unique)
@@ -50,6 +53,60 @@ async def process_files(
     progress = cl.Message(content="Processing documents...")
     await progress.send()
 
+    # --- Duplicate detection: replace old versions of same-name files ---
+    incoming_names_lower = {f.name.lower() for f in files}
+    duplicates = [f for f in file_list if f["name"].lower() in incoming_names_lower]
+
+    if duplicates:
+        dup_names = [d["name"] for d in duplicates]
+        print(f"Duplicate upload detected: {dup_names} — rebuilding index")
+        progress.content = f"Replacing: {', '.join(dup_names)} — rebuilding index..."
+        await progress.update()
+
+        # Remove old entries from file_list
+        dup_names_lower = {d["name"].lower() for d in duplicates}
+        remaining = [f for f in file_list if f["name"].lower() not in dup_names_lower]
+        file_list.clear()
+        file_list.extend(remaining)
+
+        # Delete old stored copies
+        for d in duplicates:
+            old_path = os.path.join(CHAINLIT_UPLOAD_STORE, d["name"])
+            if os.path.exists(old_path):
+                os.unlink(old_path)
+
+        # Delete index and rebuild from remaining stored files
+        store.delete_index(index_name)
+
+        rebuilt = []
+        for idx, f_meta in enumerate(remaining):
+            file_path = f_meta.get("path", "")
+            if not file_path or not os.path.exists(file_path):
+                alt = os.path.join(CHAINLIT_UPLOAD_STORE, f_meta["name"])
+                if os.path.exists(alt):
+                    file_path = alt
+            if not file_path or not os.path.exists(file_path):
+                print(f"Cannot re-index '{f_meta['name']}': file not found, skipping")
+                continue
+            try:
+                progress.content = f"Re-indexing ({idx + 1}/{len(remaining)}): {f_meta['name']}..."
+                await progress.update()
+                if not rebuilt:
+                    store.create_index(index_name, file_path, f_meta["name"])
+                else:
+                    store.add_to_index(index_name, file_path, f_meta["name"])
+                rebuilt.append(f_meta)
+            except Exception as e:
+                print(f"Failed to re-index {f_meta['name']}: {e}")
+
+        # Update file_list to only successfully rebuilt files
+        file_list.clear()
+        file_list.extend(rebuilt)
+
+        # After rebuild, new files will be added on top
+        is_first_upload = not rebuilt
+
+    # --- Process each incoming file ---
     for i, file in enumerate(files):
         fname = file.name
         fpath = file.path
@@ -58,114 +115,32 @@ async def process_files(
         await progress.update()
 
         try:
-            if fname.lower().endswith('.pdf'):
-                # Get page count for progress reporting
-                page_count = get_pdf_page_count(fpath)
-                progress.content = f"Indexing {fname} ({page_count} pages)..."
-                await progress.update()
+            pages = _index_single_file(
+                store, index_name, fname, fpath,
+                is_first=(is_first_upload and i == 0 and not file_list),
+            )
+            if pages is None:
+                await cl.Message(content=f"Unsupported or failed: {fname}").send()
+                continue
 
-                # Index the PDF - Byaldi handles page screenshots internally
-                if is_first_upload and i == 0:
-                    pages = store.create_index(index_name, fpath, fname)
-                else:
-                    pages = store.add_to_index(index_name, fpath, fname)
+            # Save persistent copy (overwrite if exists)
+            stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
+            shutil.copy2(fpath, stored_path)
 
-                # Save persistent copy for future re-indexing (/delete command)
-                stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
-                if not os.path.exists(stored_path):
-                    shutil.copy2(fpath, stored_path)
-
-                total_pages += pages
-                file_list.append({
-                    "name": fname,
-                    "pages": pages,
-                    "type": "pdf",
-                    "path": stored_path,
-                })
-                print(f"Indexed PDF: {fname} ({pages} pages)")
-
-            elif fname.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
-                # Index single image
-                if is_first_upload and i == 0:
-                    pages = store.create_index(index_name, fpath, fname)
-                else:
-                    pages = store.add_to_index(index_name, fpath, fname)
-
-                stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
-                if not os.path.exists(stored_path):
-                    shutil.copy2(fpath, stored_path)
-
-                total_pages += pages
-                file_list.append({
-                    "name": fname,
-                    "pages": 1,
-                    "type": "image",
-                    "path": stored_path,
-                })
-                print(f"Indexed image: {fname}")
-
-            elif fname.lower().endswith('.docx'):
-                # Convert DOCX to PDF first, then index
-                pdf_path = _convert_docx_to_pdf(fpath)
-                if pdf_path:
-                    if is_first_upload and i == 0:
-                        pages = store.create_index(index_name, pdf_path, fname)
-                    else:
-                        pages = store.add_to_index(index_name, pdf_path, fname)
-
-                    # Save original DOCX for re-indexing
-                    stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
-                    if not os.path.exists(stored_path):
-                        shutil.copy2(fpath, stored_path)
-
-                    total_pages += pages
-                    file_list.append({
-                        "name": fname,
-                        "pages": pages,
-                        "type": "docx",
-                        "path": stored_path,
-                    })
-                    print(f"Indexed DOCX (via PDF): {fname} ({pages} pages)")
-                    os.unlink(pdf_path)
-                else:
-                    await cl.Message(
-                        content=f"Could not convert {fname} to PDF for visual indexing."
-                    ).send()
-
-            elif fname.lower().endswith('.txt'):
-                # Convert text to PDF for visual indexing
-                pdf_path = _convert_txt_to_pdf(fpath)
-                if pdf_path:
-                    if is_first_upload and i == 0:
-                        pages = store.create_index(index_name, pdf_path, fname)
-                    else:
-                        pages = store.add_to_index(index_name, pdf_path, fname)
-
-                    stored_path = os.path.join(CHAINLIT_UPLOAD_STORE, fname)
-                    if not os.path.exists(stored_path):
-                        shutil.copy2(fpath, stored_path)
-
-                    total_pages += pages
-                    file_list.append({
-                        "name": fname,
-                        "pages": pages,
-                        "type": "txt",
-                        "path": stored_path,
-                    })
-                    print(f"Indexed TXT (via PDF): {fname} ({pages} pages)")
-                    os.unlink(pdf_path)
-            else:
-                await cl.Message(
-                    content=f"Unsupported file type: {fname}"
-                ).send()
+            total_pages += pages
+            file_list.append({
+                "name": fname,
+                "pages": pages,
+                "type": _detect_file_type(fname),
+                "path": stored_path,
+            })
+            print(f"Indexed {fname} ({pages} pages)")
 
         except Exception as e:
             print(f"Error processing {fname}: {e}")
             import traceback
             traceback.print_exc()
-            await cl.Message(
-                content=f"Error processing {fname}: {str(e)}"
-            ).send()
+            await cl.Message(content=f"Error processing {fname}: {str(e)}").send()
 
     # Persist file metadata alongside the index
     if total_pages > 0:
@@ -178,6 +153,63 @@ async def process_files(
         ).send()
 
     return total_pages
+
+
+def _detect_file_type(fname: str) -> str:
+    """Get file type string from filename."""
+    lower = fname.lower()
+    if lower.endswith('.pdf'):
+        return 'pdf'
+    if lower.endswith(('.png', '.jpg', '.jpeg', '.webp')):
+        return 'image'
+    if lower.endswith('.docx'):
+        return 'docx'
+    if lower.endswith('.txt'):
+        return 'txt'
+    return 'unknown'
+
+
+def _index_single_file(store, index_name: str, fname: str, fpath: str,
+                        is_first: bool) -> int:
+    """
+    Index a single file into Byaldi. Handles format conversion.
+
+    Returns page count, or None if unsupported.
+    """
+    if fname.lower().endswith('.pdf'):
+        page_count = get_pdf_page_count(fpath)
+        if is_first:
+            return store.create_index(index_name, fpath, fname)
+        return store.add_to_index(index_name, fpath, fname)
+
+    if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+        if is_first:
+            return store.create_index(index_name, fpath, fname)
+        return store.add_to_index(index_name, fpath, fname)
+
+    if fname.lower().endswith('.docx'):
+        pdf_path = _convert_docx_to_pdf(fpath)
+        if not pdf_path:
+            return None
+        try:
+            if is_first:
+                return store.create_index(index_name, pdf_path, fname)
+            return store.add_to_index(index_name, pdf_path, fname)
+        finally:
+            os.unlink(pdf_path)
+
+    if fname.lower().endswith('.txt'):
+        pdf_path = _convert_txt_to_pdf(fpath)
+        if not pdf_path:
+            return None
+        try:
+            if is_first:
+                return store.create_index(index_name, pdf_path, fname)
+            return store.add_to_index(index_name, pdf_path, fname)
+        finally:
+            os.unlink(pdf_path)
+
+    return None
 
 
 # =============================================================================
